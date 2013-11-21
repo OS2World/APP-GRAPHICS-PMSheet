@@ -1,0 +1,90 @@
+BOOL initPrinter(HAB habAnchor,
+                 PPRINTDEST ppdPrinter,
+                 PDEVOPENSTRUCT pdosPrinter)
+
+//---------------------------------------------
+// This function will query the default driver
+// data for the printer specified in ppdPrinter.
+// It is the caller's responsibility to free
+// the data using free().
+//
+// Input:  habAnchor - anchor block of the calling
+//                     thread.
+//         ppdPrinter - pointer to the PRINTDEST
+//                      structure passed via
+//                      the DM_PRINTOBJECT message.
+// Output:  pdosPrinter - points to the variable
+//                        which received the new
+//                        DEVOPENSTRUC structure.
+// Returns:  TRUE if successful, FALSE otherwise.
+//------------------------------------------------
+{
+   ULONG ulNeeded;
+   PPRQINFO3 ppiQueue;
+   CHAR achDriver[64];
+   CHAR achDevice[64];
+   PCHAR pchPos;
+
+   *pdosPrinter=*((PDEVOPENSTRUC)
+                  (ppdPrinter->pdopData));
+
+   SplQueryQueue(NULL,
+                 pdosPrinter->pszLogAddress,
+                 3,
+                 NULL,
+                 0,
+                 &ulNeeded);
+
+   ppiQueue=malloc(ulNeeded);
+   if (ppiQueue==NULL) {
+      return FALSE;
+   } /* endif */
+
+   SplQueryQueue(NULL,
+                 pdosPrinter->pszLogAddress,
+                 3,
+                 ppiQueue,
+                 ulNeeded,
+                 &ulNeeded);
+
+   strcpy(achDriver,ppiQueue->pszDriverName);
+   free(ppiQueue);
+
+   pchPos=strchr(achDriver,'.');
+   if (pchPos!=NULL) {
+      *pchPos=0;
+      strcpy(achDevice,pchPos+1);
+   } else {
+      achDevice[0]=0;
+   } /* endif */
+
+   ulNeeded=DevPostDeviceModes(habAnchor,
+                               NULL,
+                               achDriver,
+                               achDevice,
+                               ppdPrinter->pszPrinter,
+                               DPDM_QUERYJOBPROP);
+
+   pdosPrinter->pdriv=malloc(ulNeeded);
+   if (pdosPrinter->pdriv==NULL) {
+      return FALSE;
+   } /* endif */
+
+   DevPostDeviceModes(habAnchor,
+                      pdosPrinter->pdriv,
+                      achDriver,
+                      achDevice,
+                      ppdPrinter->pszPrinter,
+                      DPDM_QUERYJOBPROP);
+
+   if ((ppdPrinter->fl & PD_JOB_PROPERTY)!=0) {
+      DevPostDeviceModes(habAnchor,
+                         pdosPrinter->pdriv,
+                         achDriver,
+                         achDevice,
+                         NULL,
+                         DPDM_POSTJOBPROP);
+   } /* endif */
+
+   return TRUE;
+}

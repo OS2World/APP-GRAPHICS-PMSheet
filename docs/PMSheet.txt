@@ -1,0 +1,12 @@
+http://home-5.worldonline.nl/~jdekeij/pmsheet.html
+
+
+English version   PMSHEET.ZIP	by Jasper de Keijzer
+German version	GMPMSHT.ZIP 	by Andreas Kohl
+Dutch version ( Nederlands ) 	PMSHTNL.ZIP	by Kris Steenhaut
+Has NOT been verified by Jasper de Keijzer due to system problems.
+
+Source code of pmsheet 	pmshtsrc.zip	To build your own pmsheet or to use in your own projects
+
+Copyright statement for the source code.
+The source code may be used in any software project, commercial and non commercial. The usage is free of charge. Requested but not required is a statement in the about of the developed program which says where the software is based upon. Something like, based on pmsheet sources by J.de Keijzer. Like you can see in the help of pmsheet, here I explictly thank the developers of the jpeg library and the developer of the open bitmap reader sources. 

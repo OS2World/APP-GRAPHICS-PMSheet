@@ -1,0 +1,17 @@
+
+DLGTEMPLATE 100 LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG  "Picture", 100, 141, 92, 227, 130, WS_VISIBLE, FCF_TITLEBAR
+    BEGIN
+        GROUPBOX        "Picture properties", 101, 4, 25, 219, 99
+        LTEXT           "Width", 102, 20, 98, 44, 8
+        LTEXT           "Height", 103, 20, 78, 31, 8
+        LTEXT           "Image data size", 104, 19, 38, 80, 8
+        LTEXT           "Colours", 105, 20, 58, 51, 8
+        LTEXT           "pixel width", 106, 115, 98, 60, 8
+        LTEXT           "pixel height", 107, 115, 78, 60, 8
+        LTEXT           "Color depth", 108, 115, 58, 60, 8
+        LTEXT           "data size", 109, 115, 39, 60, 8
+        PUSHBUTTON      "OK", 110, 5, 6, 40, 14
+    END
+END

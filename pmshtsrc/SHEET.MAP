@@ -1,0 +1,23 @@
+
+ sheet
+
+ Start         Length     Name                   Class
+ 0001:00000000 0000253ACH CODE32                 CODE 32-bit
+ 0001:000253AC 000000030H _MSGSEG32              CODE 32-bit
+ 0002:00000000 000002E80H DATA32                 DATA 32-bit
+ 0002:00002E80 000000000H CTOR_DTOR1             DATA 32-bit
+ 0002:00002E80 000000000H CTOR_DTOR2             DATA 32-bit
+ 0002:00002E80 000000000H CTOR_DTOR3             DATA 32-bit
+ 0002:00002E80 000001480H CONST32                CONST 32-bit
+ 0002:00004300 00000000CH EDC1                   EDC_CLASS 32-bit
+ 0002:0000430C 0000004B0H EDC2                   EDC_CLASS 32-bit
+ 0002:000047BC 000000004H EDC3                   EDC_CLASS 32-bit
+ 0002:000047C0 000000000H BSS32                  BSS 32-bit
+ 0002:000047C0 000000304H c_common               BSS 32-bit
+ 0002:00004AD0 00000D6D8H STACK32                STACK 32-bit
+
+ Origin   Group
+ 0002:0   DGROUP
+ 0000:0   FLAT
+
+Program entry point at 0001:00018E80

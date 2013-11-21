@@ -1,0 +1,145 @@
+#define INCL_WIN
+#include <os2.h>
+#include "resource.h"
+
+BITMAP ID_DRAGBMP  "dragbmp.bmp"
+BITMAP IDB_SELECT  "tbar\\select.bmp"
+BITMAP IDB_ZOOM    "tbar\\zoom.bmp"
+BITMAP IDB_DELETE  "tbar\\trash.bmp"
+BITMAP IDB_LARGE   "tbar\\large.bmp"
+BITMAP IDB_MEDIUM  "tbar\\medium.bmp"
+BITMAP IDB_SMALL    "tbar\\small.bmp"
+BITMAP IDB_SORTNAME "tbar\\srtname.bmp"
+BITMAP IDB_PROJECT  "tbar\\project.bmp"
+BITMAP IDB_SORTSIZE "tbar\\srtsize.bmp"
+BITMAP IDB_ROTLEFT  "tbar\\rotleft.bmp"
+BITMAP IDB_ROTRIGHT "tbar\\rotright.bmp"
+
+ICON ID_FOLDER_ICON LOADONCALL MOVEABLE DISCARDABLE "dirctrl\\folder.ico"
+ICON ID_NETDRV_ICON LOADONCALL MOVEABLE DISCARDABLE "dirctrl\\netdrv.ico"
+ICON ID_HRDDRV_ICON LOADONCALL MOVEABLE DISCARDABLE "dirctrl\\hrddrv.ico"
+ICON ID_FLPDRV_ICON LOADONCALL MOVEABLE DISCARDABLE "dirctrl\\flpdrv.ico"
+ICON ID_CDDRV_ICON  LOADONCALL MOVEABLE DISCARDABLE "dirctrl\\cddrv.ico"
+
+
+
+MENU ID_RESOURCE
+BEGIN
+/*    MENUITEM "New",  IDM_NEW,  MIS_TEXT */
+    SUBMENU "~File", IDM_FILE, MIS_TEXT
+    BEGIN
+        MENUITEM "E~xit\tF3",IDM_EXIT,   MIS_TEXT
+    END
+    SUBMENU "~Edit", IDM_EDIT, MIS_TEXT
+    BEGIN
+        MENUITEM "Select ~All\tCtrl-/",    IDM_SEL,   MIS_TEXT
+    	MENUITEM "Select ~None\tCtrl-\\",   IDM_NONE,  MIS_TEXT
+        MENUITEM SEPARATOR
+    	MENUITEM "Reload current directory\tF5",IDM_RELOAD,  MIS_TEXT
+
+    END
+
+    SUBMENU "~View", IDM_VIEW, MIS_TEXT
+    BEGIN
+        MENUITEM "~Small Thumbnails",    IDM_SMALL,   MIS_TEXT
+        MENUITEM "~Medium Thumbnails",   IDM_MEDIUM,  MIS_TEXT
+        MENUITEM "~Large  Thumbnails",   IDM_LARGE,   MIS_TEXT
+        MENUITEM SEPARATOR
+        MENUITEM "Sl~ideshow",           IDM_SLIDESHOW,MIS_TEXT
+        MENUITEM SEPARATOR
+        SUBMENU "~Sort", IDM_SORTMENU, MIS_TEXT
+        BEGIN
+            MENUITEM "~Name",   IDM_SORTNAME,   MIS_TEXT
+            MENUITEM "~Size",   IDM_SORTSIZE,   MIS_TEXT
+            END
+		MENUITEM "~Detail",              IDM_DETAIL,  MIS_TEXT
+    END
+/* MENUITEM "CD_ROM",  IDM_CDROM,   MIS_TEXT*/
+   SUBMENU "~Help",  IDM_HELPMENU,  MIS_TEXT
+   BEGIN
+        MENUITEM "~Help index",    IDM_HELPINDEX,MIS_TEXT
+        MENUITEM "~General help\t<F1>",    IDM_HELP,   MIS_TEXT
+        MENUITEM SEPARATOR
+        MENUITEM "~About",   IDM_ABOUT,  MIS_TEXT
+   END
+END
+
+
+ACCELTABLE ID_RESOURCE
+BEGIN
+    47      , IDM_SEL ,CHAR,CONTROL
+    92      , IDM_NONE,CHAR,CONTROL
+    VK_F3   , IDM_EXIT,AF_VIRTUALKEY
+    VK_F5   , IDM_RELOAD,AF_VIRTUALKEY
+    VK_F1   , IDM_HELP,AF_VIRTUALKEY
+
+END
+
+
+DLGTEMPLATE DLG_PROGRESS LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG  "Progress", DLG_PROGRESS, 105, 64, 196, 54, WS_VISIBLE, FCF_TITLEBAR
+    BEGIN
+        PUSHBUTTON      "Cancel", DID_CANCEL, 75, 5, 40, 14
+        LTEXT           "Filename", TXT_FILENAME, 9, 38, 176, 9
+                        PRESPARAMS PP_FONTNAMESIZE, "8.Helv"
+        CONTROL         "", ID_PROGRESSWND, 6, 24, 185, 6, "PROGRESSCLASS", WS_GROUP | 
+                        WS_VISIBLE
+    END
+END
+
+
+DLGTEMPLATE DLG_TREECOPYPROGRESS LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG  "Progress", DLG_TREECOPYPROGRESS, 105, 64, 196, 54, WS_VISIBLE, FCF_TITLEBAR
+    BEGIN
+        PUSHBUTTON      "Cancel", DID_CANCEL, 75, 5, 40, 14
+        LTEXT           "Filename", TXT_FILENAME, 9, 38, 176, 9
+                        PRESPARAMS PP_FONTNAMESIZE, "8.Helv"
+        CONTROL         "", ID_TREEPROGRESSWND, 6, 24, 185, 6, "TREECOPYPROGRESS", WS_GROUP | 
+                        WS_VISIBLE
+    END
+END
+
+
+STRINGTABLE PRELOAD
+BEGIN
+    IDS_HELPLIBRARYNAME   "PMSHEET.HLP"
+    IDS_CANNOTLOADSTRING  "Failed to load string."
+    IDS_HELPLOADERROR     "Failed to load help manager."
+    IDS_HELPDISPLAYERROR  "Failed to display help panel."
+    IDS_HELPWINDOWTITLE   "PMSheet"
+    IDS_HELPGENERALERROR  "Failed to display general help panel."
+    IDS_HELPKEYSERROR     "Failed to display key help panel."
+    IDS_HELPINDEXERROR    "Failed to display index help panel."
+
+    IDS_DELETEIMG   "Delete %d images from your disk?"
+    IDS_DOSCOPYERR  "Could not copy the selected image(s) due to system error"
+    IDS_SELECTED    "%d Image(s) Selected"
+    IDS_FILE_NOT_FOUND "File not found"
+    IDS_PATH_NOT_FOUND "Path not found"
+    IDS_ACCESS_DENIED  "Access denied"
+    IDS_NOT_DOS_DISK   "This is not a DOS disk"
+    IDS_SHARING_VIOLATION "Sharing violation"
+    IDS_SHARING_BUFFER_EXCEEDED  "Sharing buffer exceeded"
+    IDS_INVALID_PARAMETER  "Invalid parameter"
+    IDS_FILENAME_EXCED_RANGE "Filename exceeds range"
+    IDS_REPLACE_FILE "File: %s \nalready exists!\nDo you want to overwrite it?"
+    IDS_WARNING "Warning"
+    IDS_DELQUESTION "Do you realy want to delete the selected picture(s) from your disk?"
+    IDS_CANNOTDELETE "Cannot delete requested pictures from your disk. Files are readonly"
+    IDS_FOLDERSTRING "Folder contains:%ld images. Total datasize:%ld"
+    IDS_DETAILSTRING "Name:%s Size:%ld X %ld"
+    IDS_WRITE_PROTECT "Disk is write protected"
+    IDB_ZOOM "Zoom selected image"
+    IDB_DELETE "Delete selected image(s)"
+    IDB_SMALL "Show images in small thumbnails"
+    IDB_MEDIUM "Show images in medium sized thumbnails"
+    IDB_LARGE "Show images in large thumbnails"
+    IDB_SELECT "No text available"
+    IDB_SORTSIZE "Sort on image size"
+    IDB_SORTNAME "Sort on image name"
+    IDB_PROJECT  "Start slide show of selected images"
+    IDB_ROTLEFT  "Rotate selected image(s) 90 degrees to the left"
+    IDB_ROTRIGHT "Rotate selected image(s) 90 degrees to the right"
+END

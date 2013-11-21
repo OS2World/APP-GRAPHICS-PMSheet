@@ -1,0 +1,14 @@
+#ifndef OS2_INCLUDED
+   #include <os2.h>
+#endif
+
+DLGTEMPLATE 100 LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG  "Progress", 100, 105, 64, 196, 54, WS_VISIBLE, FCF_TITLEBAR
+    BEGIN
+        PUSHBUTTON      "Cancel", DID_CANCEL, 75, 5, 40, 14
+        LTEXT           "Filename", 101, 9, 38, 176, 9
+        SLIDER          102, 4, 21, 187, 15, SLS_READONLY | WS_GROUP
+                        CTLDATA 12, 0, 10, 0, 0, 0
+    END
+END

@@ -1,0 +1,72 @@
+#---------------------------------
+# pictuer sheet.  
+#---------------------------------
+JPEG       = ..\JPEG
+SHT        = .\SHEET
+STL        = .\STATUS
+DCT        = .\DIRCTRL
+TBR        = .\TBAR
+APP        = .
+IGBM       = \DRW29\LIB
+GBLIB      = \DRW29\LIB\drwgbm3.lib
+
+CCDEB         = icc /c /ti  /I$(JPEG)  /I$(IGBM) /I$(STL) /I$(SHT) /I$(DCT) /I$(TBR) /O- /Ge /Gd- /Se /Re /ss /Gm+ /sm
+CC      = icc /c /I$(JPEG)  /I$(IGBM) /I$(STL) /I$(SHT) /I$(DCT) /I$(TBR) /O- /G5 /Sp4 /Ge /Gd- /Se /Re /ss /Gm+ /sm
+appmain.obj : appmain.cpp
+    $(CC) appmain.cpp
+
+shthlp.obj : shthlp.c
+   $(CC) shthlp.c
+
+sheet.obj : $(SHT)\sheet.cpp
+   $(CC) $(SHT)\sheet.cpp
+
+shtdir.obj : $(SHT)\shtdir.cpp
+   $(CC) $(SHT)\shtdir.cpp
+
+shtjpg.obj : $(SHT)\shtjpg.c
+   $(CC) $(SHT)\shtjpg.c
+
+shtwrjpg.obj : $(SHT)\shtwrjpg.c
+   $(CC) $(SHT)\shtwrjpg.c
+
+shtpic.obj : $(SHT)\shtpic.c
+   $(CC) $(SHT)\shtpic.c
+
+dirctrl.obj : $(DCT)\dirctrl.cpp
+   $(CC) $(DCT)\dirctrl.cpp
+
+statline.obj : $(STL)\statline.cpp
+   $(CC) $(STL)\statline.cpp
+
+tbar.obj : $(TBR)\tbar.cpp
+   $(CC) $(TBR)\tbar.cpp
+
+tbutton.obj : $(TBR)\tbutton.c
+   $(CC) $(TBR)\tbutton.c
+
+tooltip.obj : $(TBR)\tooltip.cpp
+   $(CC) $(TBR)\tooltip.cpp
+
+sheet.res : $(APP)\sheet.rc
+   rc -r $(APP)\sheet.rc
+
+
+pmsheet.exe : appmain.obj shthlp.obj sheet.obj shtdir.obj shtjpg.obj shtwrjpg.obj shtpic.obj tbutton.obj tbar.obj statline.obj dirctrl.obj tooltip.obj sheet.res
+   ilink /nofree /ALIGN:4 /NOLOGO /PMTYPE:PM @<< <<sheet.def 
+appmain.obj statline.obj sheet.obj shthlp.obj shtdir.obj shtjpg.obj shtpic.obj shtwrjpg.obj dirctrl.obj tbutton.obj tbar.obj tooltip.obj,
+$@,
+sheet.map,
+os2386 ..\JPEG\libjpeg.lib $(GBLIB),
+sheet.def
+<<NOKEEP
+NAME            pmsheet      WINDOWAPI
+DESCRIPTION     'pmsheet'
+PROTMODE
+DATA            MULTIPLE
+HEAPSIZE        18092
+STACKSIZE       55000
+<<NOKEEP
+   rc $(APP)\sheet.res pmsheet.exe
+
+
