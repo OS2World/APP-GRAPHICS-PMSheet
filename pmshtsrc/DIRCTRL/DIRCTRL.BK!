@@ -1,0 +1,1714 @@
+/*---------------------------------------------------------------------------*/
+/*                                                                           */
+/* Module      : dirctrl.cpp                                                 */
+/*                                                                           */
+/* Description : implements the directory control.                           */
+/*                                                                           */
+/*                                                                           */
+/* Author      : Jasper de Keijzer.     sept-2002                            */
+/*                                                                           */
+/*                                                                           */
+/* Legal note  : This source may be used in any commercial or non commercial */
+/*               software package without any restriction.                   */
+/*                                                                           */
+/*                                                                           */
+/*                                                                           */
+/*      WHEN YOU CHANGE THIS FILE:                                           */
+/*                                                                           */
+/*         - always notify the owner                                         */
+/*         - use TAB-size = 4 characters, replaced by spaces!                */
+/*         - avoid using more than 80 columns                                */
+/*         - add variables/declarations to the correct section               */
+/*                                                                           */
+/*--nr---yymmdd---who-----------------------description----------------------*/
+/*  1    021003   Jasper  Commented out printf and changes and CCHMAXPATH    */
+/*  2    ------   ------  Bug fixes, multiple drives with the same letter.   */
+/*  3    ------   ------  fix for fixpack >= 11 for finding directories      */
+/*---------------------------------------------------------------------------*/
+#define INCL_WIN
+#define INCL_GPI
+#define INCL_DOS
+#define INCL_DOSERRORS
+#define INCL_DOSDEVIOCTL
+#define INCL_WINWINDOWMGR
+#define INCL_WINSYS
+#define INCL_WINPOINTERS
+#define INCL_WINSTDCNR
+#define INCL_WINSTDDRAG
+#define INCL_WINMENUS
+#define INCL_WINMESSAGEMGR
+#define INCL_DOSMODULEMGR
+#define INCL_WININPUT
+#define INCL_GPILCIDS
+#include <os2.h>
+#include <io.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <direct.h>                    // for getcwd
+#include "..\resource.h"
+#include "dirctrl.hpp"
+
+#define DB_RAISED    0x0400	    /* the undocumented value's */
+#define DB_DEPRESSED 0x0800     /* drawbox.                 */
+
+/*
+** The 'very' private definitions
+*/
+
+#define UM_DRIVELIST         WM_USER+100
+#define UM_FOLDERLIST        WM_USER+101
+#define UM_DRIVE_NOT_READY   WM_USER+102
+#define UM_ADD_INCOMPLETE    WM_USER+103
+#define UM_DOSERROR          WM_USER+104
+#define UM_SHOWFILENAME      WM_USER+105
+#define UM_COUNTFILES     WM_USER+106
+#define UM_CLOSEPROGRESS  WM_USER+108
+#define UM_SHOWPROGRESS   WM_USER+109
+
+#define DIR_TIMEOUT     1000 /* 1 SEC */
+
+#define UACT_SKIP           0x0001
+#define UACT_OVERWRITE      0x0002
+#define UACT_NEWITEM        0x0003
+
+PSZ            pDrives[26];
+CHAR           szDriveTypes[26][CCHMAXPATH];
+USHORT         No_of_Drives;
+char           szErrBuf[255];
+static         HAB habMain;
+typedef struct _dropcopyblock
+{
+   HWND         hwndClient;
+   char        *pszTargetFolder;
+   PDRAGINFO    pDragInfo;
+   unsigned int *pAction;
+}dropcopyblock;
+
+
+MRESULT EXPENTRY fileCopyDlgProc(HWND hwnd, USHORT msg, MPARAM mp1, MPARAM mp2 );
+MRESULT EXPENTRY copyProgressBarWndProc(HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2);
+
+/*****************************************************************************/
+/* Defines Drive types                                                       */
+/*****************************************************************************/
+#define DSK_HARDDRIVE  0x01
+#define DSK_LANDRIVE   0x02
+#define DSK_FLOPPY     0x03
+#define DSK_CDROM      0x04
+
+
+/*---------------------------------------------------------------------------*/
+static void errorDosCopy(HWND hParent,int iret )
+{
+    char szErrBuf[CCHMAXPATH];
+
+    memset(szErrBuf,0,CCHMAXPATH);
+
+    switch(iret)
+    {
+    case ERROR_FILE_NOT_FOUND:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_FILE_NOT_FOUND,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_PATH_NOT_FOUND:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_PATH_NOT_FOUND,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_ACCESS_DENIED :
+        WinLoadString((HAB)0,(HMODULE)0,IDS_ACCESS_DENIED,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_NOT_DOS_DISK:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_NOT_DOS_DISK,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_SHARING_VIOLATION:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_SHARING_VIOLATION,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_SHARING_BUFFER_EXCEEDED:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_SHARING_BUFFER_EXCEEDED,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_INVALID_PARAMETER: 
+        WinLoadString((HAB)0,(HMODULE)0,IDS_INVALID_PARAMETER,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_FILENAME_EXCED_RANGE:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_FILENAME_EXCED_RANGE,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_WRITE_PROTECT:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_WRITE_PROTECT,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    default:
+        sprintf(szErrBuf,"unknown error..%d..",iret);
+        break;
+    }
+    WinPostMsg(hParent,UM_DOSERROR,(MPARAM)strdup(szErrBuf),(MPARAM)0);
+
+}
+//  Find which drives are valid, 'hard', and writable to.
+
+/*****************************************************************************
+** First we obtain a list of all the drives present in the system.  This is **
+** returned in a drive MAP with a call to DosQueryCurrentDisk.  This MAP is **
+** an unsigned long where the least significant 26 bits represent a logical **
+** drive presence map.  A '1' (set) bit represents the drive is present.    **
+**                                                                          **
+** Next we turn off error reporting for hard and exception errors; this     **
+** allows us to query the floppy drives without the abort, retry, ignore PM **
+** message box appearing.                                                   **
+** We then pop a box on the screen informing the user that this may take a  **
+** little while, change the pointer to the PM WAIT pointer (clock), then do **
+** our stuff with each drive that's present.                                **
+**                                                                          **
+** We use a call to DosDevIOCtl (now don't run away, it's not that bad) to  **
+** query each device present.  Now this stuff is largely undocumented, but  **
+** is official (so it should work in future versions, it's just the OS/2    **
+** docs are so bad!).  The important bits to remember are:                  **
+**                                                                          **
+**  1)  The HFILE for the call is set to -1, we could also open the disk    **
+**      with a DosOpen and use the handle returned there, but why bother,   **
+**      besides, the very, very small print in the docs says use -1.        **
+**  2)  IOCTL_DISK is Category #8 in the IOCtl documentation.               **
+**  3)  DSK_GETDEVICEPARAMS is function #63 in the IOCtl documentation.     **
+**  4)  The PARAMS passed is a 2 byte structure (DriveRequest) with a       **
+**      Command byte and a DriveUnit byte.  The Command byte tells the call **
+**      to either use the default media for that drive (0) or query the     **
+**      actual media in the drive (1).  The DriveUnit is the number of the  **
+**      drive (0 = A:, 1 = B:, etc.).                                       **
+**  5)  The DATA is the information that the call returns to us.  It's in   **
+**      form of BIOSPARAMETERBLOCK.  We allocate an array of 26 of these, 1 **
+**      for each potential drive: devices[ 26 ].                            **
+**      It's the devices[ i ].bDeviceType that we're really interested in.  **
+**  6)  Now the problem with this call is that it will only return data for **
+**      drives that are local to our machine.  It doesn't return anything   **
+**      remote drives, not even an error!                                   **
+** Note: VDISKS are returned as DeviceType unknown (not Fixed).  If we      **
+**       should ever need to allow for them then they can be distinguished  **
+**       by the fact that they have only 1 FAT (device[ i ].cFATs = 1).     **
+** Note: There's an extension to DevIOCtl in WARP that allows querying of   **
+**       CDROM's - this should be implemented ASAP.                         **
+**                                                                          **
+** For each drive we query the file system that is attached with            **
+** DosQueryFSAttach.  This tells us if the drive is local or remote.  At    **
+** moment we assume that if it's remote then it's FIXED (which is not       **
+** always the case, I know).  This call also returns the type of file       **
+** system that's attached (FAT, HPFS, various networks, etc.) which we      **
+** stash in an array for display later.                                     **
+**                                                                          **
+** We then try and open the CD-ROM device and try to find which drive(s)    **
+** are attached using a call to DosDevIOCtl again (Cat #82, Fn #60) with    **
+** a structure cdinfo passed as the DATA to the device.  We mark these      **
+** disks as CD-ROM and hence unwritable.                                    **
+**                                                                          **
+** An array of drive letters is created from the available drives, along    **
+** an array of pointers to these for the Spin Button.                       **
+**                                                                          **
+** To tidy up we return the PM pointer back to an arrow, dismiss the dialog **
+** box message, and restore error reporting back to normal.                 **
+**                                                                          **
+** The function returns the number of drives in the system.                 **
+**                                                                          **
+*****************************************************************************/
+static USHORT GetAvailableDrives(HWND hwnd, char *DriveArray, char **pDriveArray )
+{
+    struct { BYTE Command; BYTE DriveUnit; } DriveRequest;
+    struct { USHORT count; USHORT first; } cdinfo;
+    BIOSPARAMETERBLOCK devices[ 26 ];
+
+    ULONG parmsize, datasize, len;
+    ULONG DriveNumber, LogicalDriveMap, mask;
+    USHORT i, count = 0;
+    APIRET rc;
+    HFILE DevHandle;
+    char drive[] = "A:";
+    ULONG Action;
+    PFSQBUFFER2 fsinfo = (PFSQBUFFER2)malloc( sizeof( FSQBUFFER2 ) + 3 * CCHMAXPATH );
+    PSZ pszFSName, pszFSData;
+    XDIRLIST *pList;
+    XDIRDATA *pDir;
+    int iType = DSK_HARDDRIVE;
+
+    pList = new XDIRLIST();
+
+    memset(&devices,0,sizeof(devices));
+
+    DosQueryCurrentDisk( &DriveNumber, &LogicalDriveMap );
+
+    DriveRequest.Command = 0;
+
+    // turn off error popups for removables with no media
+    DosError( FERR_DISABLEEXCEPTION | FERR_DISABLEHARDERR );
+
+    for ( i = 0, mask = 1; i < 26; i++, mask <<= 1 ) 
+    {
+        iType = DSK_HARDDRIVE;
+
+        if ( ( mask & LogicalDriveMap ) )      // is the drive present?
+        {
+            DriveRequest.DriveUnit = i;
+            parmsize = sizeof( DriveRequest );
+            datasize = sizeof( devices[ i ] );
+
+            drive[ 0 ] = 'A' + i;
+            
+
+            rc = DosDevIOCtl( -1,
+                         IOCTL_DISK,            // Category #8 (Logical Disk Control )
+                         DSK_GETDEVICEPARAMS,   // Function #63
+                         (PVOID)&DriveRequest,
+                         sizeof( DriveRequest ),
+                         &parmsize,
+                         (PVOID)&devices[ i ],
+                         sizeof( devices[ i ] ),
+                         &datasize );
+
+            len = sizeof( FSQBUFFER2 ) + 3 * CCHMAXPATH;
+            fsinfo->szName[0] = 0;
+            rc = DosQueryFSAttach( drive, 0L, FSAIL_QUERYNAME, fsinfo, &len );
+
+            if( fsinfo->iType == FSAT_REMOTEDRV )          // if remote
+            {
+                devices[ i ].bDeviceType = DEVTYPE_FIXED;  // assume they're fixed (?)
+                iType = DSK_LANDRIVE;
+            }
+
+            pDir = new XDIRDATA();
+
+            pDir->iType = iType;
+
+            if ( *( fsinfo -> szName ) ) 
+            {  // is there a name (i.e. media in the drive)?
+
+                strcpy(pDir->szDisplayName,(char *)fsinfo->szName);
+                strcpy(pDir->szDirectoryName,(char *)fsinfo->szName);
+                if (pDir->szDisplayName[0] == 'A' || pDir->szDisplayName[0] == 'B' )
+                    pDir->iType = DSK_FLOPPY;
+
+                /*
+                ** After the \0 in fsinfo->szName, the drivetype is defined
+                ** for instance HPFS etc
+                ** fsinfo->cbName is length of first substring.
+                */
+                pszFSName = (PSZ)&fsinfo->szName[fsinfo->cbName + 1];   // name
+                
+                if (*pszFSName && !stricmp(pszFSName,"CDFS"))
+                    pDir->iType = DSK_CDROM;
+
+                pszFSData = pszFSName + fsinfo -> cbFSDName + 1;        // data associated with named drive
+                strcat(pDir->szDisplayName,pszFSName);                  // HPFS , LAN etc
+                strcpy( szDriveTypes[ count ], pszFSName );
+                if ( *pszFSData ) 
+                {                                                       // append the data if any
+                    strcat(pDir->szDisplayName," ( "); 
+                    strcat(pDir->szDisplayName, pszFSData );
+                    strcat(pDir->szDisplayName, " )" );
+                }
+            }
+            else
+            {
+                /*
+                ** Get the drive_letter
+                */
+                strcpy(pDir->szDisplayName,drive);
+                strcpy(pDir->szDirectoryName,drive);
+
+                if (pDir->szDisplayName[0] == 'A' || pDir->szDisplayName[0] == 'B' )
+                    pDir->iType = DSK_FLOPPY;
+
+            }
+
+            *( DriveArray + count * 2 ) = drive[ 0 ];
+            *( pDriveArray + count ) = ( DriveArray + count * 2 );
+
+            count++;
+
+            pList->addDirectory((XDIRDATA *)0,pDir);
+            
+        }
+    }
+
+    // clean up
+    free( fsinfo );
+
+    WinPostMsg(hwnd,UM_DRIVELIST,(MPARAM)pList,(MPARAM)count);
+
+    return count;
+}
+/*---------------------------------------------------------------------------*/
+void _System fileCopyThread (void *p)
+{
+   PDRAGITEM pditem;
+   USHORT    i;
+   ULONG     flResult;
+   HAB       hab;
+   HMQ       hmq;
+   PDRAGINFO pdinfo;
+   ULONG ulBytesWritten;
+   char      szFileName[80];
+   char      szSource[CCHMAXPATH];
+   char      szContain[CCHMAXPATH];
+   char      szTarget[CCHMAXPATH];
+   char      *pszFolder;
+   APIRET    rc;  /* Return code */    
+   BOOL     bNewItems = FALSE;
+   dropcopyblock *pBlock = (dropcopyblock *)p;
+
+   pdinfo    = pBlock->pDragInfo;
+   pszFolder = pBlock->pszTargetFolder;
+
+
+   printf("ENTER:fileCopyThread\n");
+//   WinPostMsg(pBlock->hwndClient,UM_SHOWPROGRESS,(MPARAM)0,(MPARAM)0);
+//   WinPostMsg(pBlock->hwndClient,UM_COUNTFILES,(MPARAM)0,(MPARAM)pdinfo->cditem);
+ 
+   /***************************************************************/
+   /* DrgSendTransferMsg needs a message queue, so create one for */
+   /* this thread                                                 */
+   /***************************************************************/
+   hab = WinInitialize (0);
+   hmq = WinCreateMsgQueue (hab, 0);
+   rc  = 0;
+   /***************************************************************/
+   /* Try to copy each item that was dragged                      */
+   /***************************************************************/
+   for (i = 0; i < pdinfo->cditem && rc == 0; i++)
+   {
+       if (pBlock->pAction[i] == UACT_SKIP)
+           continue;
+
+     /*************************************************************/
+     /* Get a pointer to the DRAGITEM                             */
+     /*************************************************************/
+        pditem = DrgQueryDragitemPtr (pdinfo, i);
+        flResult = DMFL_TARGETFAIL; 
+     /*************************************************************/
+     /* If we could query the source and target names, and the    */
+     /* copy was successful, return success                       */
+     /*************************************************************/
+
+        ulBytesWritten =DrgQueryStrName(pditem->hstrSourceName,
+                                        sizeof(szFileName),
+                                        (PSZ)szFileName);
+
+        printf("szFileName %s\n",szFileName);
+
+        if (ulBytesWritten)
+            ulBytesWritten =DrgQueryStrName(pditem->hstrContainerName,
+                                            sizeof(szContain),
+                                            (PSZ)szContain);
+
+        printf("szContain %s\n",szContain);
+
+        if (ulBytesWritten)
+        {
+            if (szContain[strlen(szContain)-1]!='\\')
+                sprintf(szSource,"%s\\%s",szContain,szFileName);
+            else
+                sprintf(szSource,"%s%s",szContain,szFileName);
+        }
+
+        if (ulBytesWritten)
+            ulBytesWritten = DrgQueryStrName (pditem->hstrTargetName, 
+                                              sizeof (szFileName),
+                                              (PSZ)szFileName);
+
+        if (ulBytesWritten)
+        {
+            if (pszFolder[strlen(pszFolder)-1]!='\\')
+                sprintf(szTarget,"%s\\%s",pszFolder,szFileName);
+            else
+                sprintf(szTarget,"%s%s",pszFolder,szFileName);
+        }
+
+//        WinPostMsg(pBlock->hwndClient,UM_SHOWFILENAME,(MPARAM)strdup(szSource),(MPARAM)0);
+        rc = DosCopy ((PSZ)szSource, (PSZ)szTarget, 0);
+
+        if (ulBytesWritten &&  !rc)
+        {
+            flResult = DMFL_TARGETSUCCESSFUL;
+        }
+ 
+     /*************************************************************/
+     /* Otherwise, return failure                                 */
+     /*************************************************************/
+        else
+        {
+            flResult = DMFL_TARGETFAIL;
+            if (rc)
+            {
+                errorDosCopy(pBlock->hwndClient,(int)rc);
+            }
+        }
+ 
+     /*************************************************************/
+     /* Let the source know we're done with this item             */
+     /*************************************************************/
+        DrgSendTransferMsg (pditem->hwndItem, DM_ENDCONVERSATION,
+                           (MPARAM) pditem->ulItemID,
+                           (MPARAM) flResult);
+
+
+    }
+ 
+    WinDestroyMsgQueue (hmq);
+    WinTerminate (hab);
+
+    DrgDeleteDraginfoStrHandles((PDRAGINFO)pdinfo);
+    DrgFreeDraginfo(pdinfo);
+    if (pBlock->pszTargetFolder)
+        free(pBlock->pszTargetFolder);
+
+    WinPostMsg(pBlock->hwndClient,UM_CLOSEPROGRESS,(MPARAM)0,(MPARAM)0);
+
+}
+/*---------------------------------------------------------------------------*/
+/*  Name        : makeFolderList                                             */
+/*                                                                           */
+/*  Description : Creates a sublist of folder/directories and notifies the   */
+/*                main thread when done. This can also mean that zero folders*/
+/*                were found.                                                */
+/*---------------------------------------------------------------------------*/
+void _System makeFolderList( ULONG lDataRef )
+{
+    comblock   *cmBlock;
+    XDIRLIST *pList;
+    XDIRDATA *pDir,*pParent;
+    cmBlock = (comblock *)lDataRef;
+    int rc;
+    long lCount,fCount;
+    int  fLevel;
+    HDIR hdir = HDIR_SYSTEM;
+    FILEFINDBUF3 fBuf;
+    char *p;
+    ULONG ulReply = 0;
+
+    fCount = 1;
+    fLevel = FIL_STANDARD;
+    lCount = 0;
+    pList  = cmBlock->pList;
+    pParent= cmBlock->pParent;
+    
+    /*("makeFolderList: szFolder=%s\n",cmBlock->szFolder);*/
+
+    strcat(cmBlock->szFolder,"*.*");
+    ulReply = 0;
+
+    rc = DosFindFirst(cmBlock->szFolder, 
+                      &hdir, 
+                      MUST_HAVE_DIRECTORY, /*FILE_DIRECTORY, */
+                      (FILEFINDBUF3 *)&fBuf, 
+                      sizeof(FILEFINDBUF3),
+                      (PULONG)&fCount,
+                      fLevel);
+
+    if (rc != NO_ERROR)
+    {
+        WinPostMsg(cmBlock->hwnd,UM_DRIVE_NOT_READY,(MPARAM)0,(MPARAM)0);
+        free((void *)cmBlock);
+        return;
+    }
+
+    if ( rc  == NO_ERROR)
+    {
+        if ( fCount )
+        {
+            if (fBuf.achName[0]!= '.' && fBuf.achName[1]!= '.' && 
+                (fBuf.attrib & 16)) /* fix for fixpack >= 11 */
+            {
+            pDir = new XDIRDATA();
+
+            p = fBuf.achName;
+            p += strlen(fBuf.achName);
+            while ( *p == '\\')
+                p--;
+            p++;
+            *p = 0;
+            p = strrchr(fBuf.achName,'\\'); 
+            if (!p)
+                p = fBuf.achName;
+            else
+                p++;
+
+
+            strcpy(pDir->szDisplayName,p);
+            strcpy(pDir->szDirectoryName,p);
+            /*printf("DosFindFirst addDirectory with name: %s\n",p);*/
+            pList->addDirectory(pParent,pDir);
+            lCount++;
+            }
+        }
+    }
+//    else
+//        printf("DosFindFirst ERROR: %d\n",rc);
+
+    while ( !rc )
+    {
+
+        rc = DosFindNext(hdir,
+                         &fBuf, sizeof(FILEFINDBUF3),(PULONG)&fCount);
+        if ( !rc && fCount )
+        {
+            if (fBuf.achName[0]!= '.' && fBuf.achName[1]!= '.')
+            {
+
+            pDir = new XDIRDATA();
+
+            p = fBuf.achName;
+            p += strlen(fBuf.achName);
+            while ( *p == '\\')
+                p--;
+            p++;
+            *p = 0;
+            p = strrchr(fBuf.achName,'\\');
+            if (!p)
+                p = fBuf.achName;
+            else
+                p++;
+
+            strcpy(pDir->szDisplayName,p);
+            strcpy(pDir->szDirectoryName,p);
+            /*printf("addDirectory with name: %s\n",p);*/
+            pList->addDirectory(pParent,pDir);
+            lCount++;
+            }
+        }
+    }
+/*    printf("WinPostMsg  UM_FOLDERLIST - parent = %08lX count = %d\n",pParent,lCount); */
+    WinPostMsg(cmBlock->hwnd,UM_FOLDERLIST,(MPARAM)pParent,(MPARAM)lCount);
+
+    free((void *)cmBlock);
+}
+/*---------------------------------------------------------------------------*/
+void _System checkFolderList( ULONG lDataRef )
+{
+    comblock   *cmBlock;
+    XDIRLIST *pList;
+    XDIRDATA *pDir,*pParent;
+    cmBlock = (comblock *)lDataRef;
+    int rc;
+    long lCount,fCount;
+    int  fLevel;
+    HDIR hdir;
+    FILEFINDBUF3 fBuf;
+    char *p;
+    char szFolder[260];
+
+    fCount = 1;
+    fLevel = FIL_STANDARD;
+    lCount = 0;
+    pList  = cmBlock->pList;
+    pParent= cmBlock->pParent;
+    
+    /*("makeFolderList: szFolder=%s\n",cmBlock->szFolder);*/
+    szFolder[0]=0;
+    pDir = pList->getFirstChild(pParent);
+    pList->creatPathForDir(pDir,szFolder);
+    while (pDir)
+    {
+        strcat(szFolder,"*.*");
+        hdir = HDIR_SYSTEM;
+        memset(&fBuf,0,sizeof(FILEFINDBUF3));
+		fCount = 1;
+		fLevel = FIL_STANDARD;
+
+        rc = DosFindFirst(szFolder, 
+                          &hdir, 
+                          MUST_HAVE_DIRECTORY, /*FILE_DIRECTORY*/
+                          (FILEFINDBUF3 *)&fBuf, 
+                          sizeof(FILEFINDBUF3),
+                          (PULONG)&fCount,
+                          fLevel);
+//        printf("checkFolderList :DosFindFirst:%s %d  returned %s\n",szFolder,rc,fBuf.achName);
+        /*
+        ** There is always a directory named '.' so try the next , ".."
+        */
+
+		if ( rc == NO_ERROR && fBuf.achName[0] == '.')
+			rc = DosFindNext(hdir,
+				             &fBuf, sizeof(FILEFINDBUF3),(PULONG)&fCount);
+
+//        printf("checkFolderList :DosFindNext ERROR :%s %d \n",fBuf.achName,rc);
+        if ( rc == NO_ERROR && fBuf.achName[0] == '.')
+            rc = DosFindNext(hdir,
+                             &fBuf, sizeof(FILEFINDBUF3),(PULONG)&fCount);
+
+
+        if ( rc == NO_ERROR )
+        {
+            WinPostMsg(cmBlock->hwnd,UM_ADD_INCOMPLETE,(MPARAM)pDir->pControlData,(MPARAM)0);
+        }
+
+        pDir = pList->getNext(pDir);
+        szFolder[0]=0;
+        if (pDir)
+            pList->creatPathForDir(pDir,szFolder);
+    }
+}
+/*---------------------------------------------------------------------------*/
+/*  Name        : makeDriveList                                              */
+/*                                                                           */
+/*  Description : Creates a list of drives and notifies the main thread when */
+/*                done.                                                      */
+/*---------------------------------------------------------------------------*/
+void _System makeDriveList( ULONG lDataRef )
+{
+    comblock   *cmBlock;
+    char  Drives[26][2];
+    char  *p;   
+
+    cmBlock = (comblock *)lDataRef;
+
+    p = Drives[0];
+
+    GetAvailableDrives(cmBlock->hwnd, p, pDrives );
+    
+
+    free((void *)cmBlock);
+}
+/*----------------------------------------------------------------------*/
+XDIRDATA::XDIRDATA ()
+{
+    szDirectoryName[0] = 0;             /* Real name like D: */
+    szDisplayName[0]   = 0;             /* displayName like D:LAN \\CWNL-1942\PM*/
+    iType              = 0;             /* floppydrive/hardrive/cdrom/dir */
+    parent             = NULL;          /* parent directory               */
+    child              = NULL;          /* child  directory               */
+    next               = NULL;          /* next directory on same level   */
+    prew               = NULL;          /* prev directory                 */
+    pControlData       = NULL; 
+}
+/*----------------------------------------------------------------------*/
+XDIRLIST::XDIRLIST()
+{
+    pBase = NULL;
+}
+/*----------------------------------------------------------------------*/
+void XDIRLIST::cleanupList (XDIRDATA *pDirData)
+{
+
+    XDIRDATA *pTmp;
+
+    while (pDirData)
+    {
+        pTmp = pDirData;
+        if (pDirData->child)
+            cleanupList (pDirData->child);
+        pDirData = pDirData->next;
+        delete pTmp;
+    }
+}
+/*----------------------------------------------------------------------*/
+XDIRLIST::~XDIRLIST ()
+{
+    if (pBase)
+        cleanupList (pBase);
+    pBase = NULL;
+}
+/*----------------------------------------------------------------------*/
+XDIRDATA * XDIRLIST::getBase()
+{
+    return pBase;
+}
+/*----------------------------------------------------------------------*/
+void XDIRLIST::creatPathForDir(XDIRDATA *pDir, char *pszDir)
+{
+    if ( pDir->parent )
+        creatPathForDir(pDir->parent,pszDir);
+
+    strcat(pszDir,pDir->szDirectoryName);
+    strcat(pszDir,"\\");
+}
+/*----------------------------------------------------------------------*/
+XDIRDATA * XDIRLIST::getNext(XDIRDATA *pDir)
+{
+    if (pDir && pDir->next)
+        return pDir->next;
+    return NULL;
+}
+/*----------------------------------------------------------------------*/
+XDIRDATA * XDIRLIST::getFirstChild(XDIRDATA *pDir)
+{
+    if (pDir && pDir->child)
+        return pDir->child;
+    return NULL;
+}
+/*----------------------------------------------------------------------*/
+void XDIRLIST::addDirectory(XDIRDATA *pParent,XDIRDATA *pDir) /* if parent not defined it must be a drive */
+{
+    XDIRDATA *pTmp = pBase;
+
+    if (!pBase)
+    {
+        pBase = pDir;
+    }
+    else if (!pParent && pBase)
+    {
+        /*
+        ** No parent given it must be a drive....
+        */
+        while (pTmp->next)
+            pTmp = pTmp->next;
+        pTmp->next = pDir;  /* add drive to list */
+    }
+    else if (pParent && pBase)
+    {
+        /*
+        ** Append pDir to child-chain of given parent
+        */
+        if (pParent->child)
+        {
+            pTmp = pParent->child;
+            while (pTmp->next)
+                pTmp = pTmp->next;
+            pTmp->next = pDir;  /* add drive to list */
+            pDir->parent = pParent;
+        }
+        else
+        {
+            pParent->child = pDir; /* first kid */
+            pDir->parent = pParent;
+        }
+    }
+}
+/*----------------------------------------------------------------------*/
+BOOL dirCtrl::makePathString(XDIRDATA *pDir, char *pszDir)
+{
+    pszDir[0] = 0;
+
+    if (!pDir || !m_pList)
+        return FALSE;
+
+    m_pList->creatPathForDir(pDir,pszDir);
+    return TRUE;
+}
+/*----------------------------------------------------------------------*/
+BOOL dirCtrl::remIncompleteNode(DIRDATARECORD *  pChain)
+{
+    DIRDATARECORD *pRec;
+    pRec = (DIRDATARECORD *)WinSendMsg (m_hwnd,
+                                        CM_QUERYRECORD,
+                                        MPFROMP(pChain),
+                                        MPFROM2SHORT(CMA_FIRSTCHILD, CMA_ITEMORDER));
+
+
+    if (pRec->pDirData)
+        return FALSE;   /* it seems to be connected, so its not a dummy! */
+
+     WinSendMsg(m_hwnd,
+                CM_REMOVERECORD,
+                MPFROMP(&pRec),
+                MPFROM2SHORT( 1, CMA_FREE | CMA_INVALIDATE ));
+    return TRUE;
+}
+/*----------------------------------------------------------------------*/
+/* Name         : dirCtrl::addIncompleteNode                            */
+/*                                                                      */
+/* Description  : Adds an dummy node to the given parent. This allows   */
+/*                the node to be expanded and notifying the             */
+/*                createFolderList method. When folders are added this  */
+/*                is first removed before the real ones are added.      */
+/*----------------------------------------------------------------------*/
+BOOL dirCtrl::addIncompleteNode(DIRDATARECORD *  pChain, BOOL bTraverse)
+{
+    DIRDATARECORD *pSingleRec;
+    RECORDINSERT   RecordInsert;
+    /*
+    ** We give each folder in the chain an incomplete child to force the appearance of a '+'
+    */
+    while ( pChain )
+    {
+        pSingleRec = (DIRDATARECORD *)WinSendMsg (m_hwnd,
+                                           CM_ALLOCRECORD,
+                                           MPFROMLONG(sizeof(DIRDATARECORD) - sizeof(MINIRECORDCORE)),
+                                           MPFROMLONG(1L));
+        pSingleRec->pDirData         = 0; /* our ticket back to the internal data tree..is NOT there. */
+        pSingleRec->MiniRec.pszIcon  = "";
+        pSingleRec->MiniRec.hptrIcon = 0;
+
+        RecordInsert.cb                = sizeof(RECORDINSERT);
+        RecordInsert.pRecordOrder      = (PRECORDCORE)CMA_FIRST;
+        RecordInsert.pRecordParent     = (PRECORDCORE)pChain;
+        RecordInsert.zOrder            = CMA_TOP;
+        RecordInsert.cRecordsInsert    = 1;
+        RecordInsert.fInvalidateRecord = TRUE;
+
+        WinSendMsg (m_hwnd,
+                    CM_INSERTRECORD,
+                    MPFROMP(pSingleRec),
+                    MPFROMP(&RecordInsert));
+
+        pChain = (DIRDATARECORD *)pChain->MiniRec.preccNextRecord;
+
+        if (!bTraverse)
+            break;
+    }
+    return TRUE;
+}
+/*----------------------------------------------------------------------*/
+BOOL dirCtrl::addFolderList(XDIRDATA * pParentDir,int iCount)
+{
+    DIRDATARECORD *  pChildRec;
+    DIRDATARECORD *  pChildRecFirst;
+    RECORDINSERT   RecordInsert;
+    BOOL           rc = TRUE;
+    ULONG          ulNumChildren = iCount;
+    XDIRDATA *     pDir;
+
+
+    if (!pParentDir  || !m_pList)
+        return FALSE;    
+
+    /* Before inserting out list of folders, we first try to remove out incomplete node. */
+    remIncompleteNode((DIRDATARECORD *)pParentDir->pControlData);
+
+    if (!iCount || !pParentDir->child)
+        return FALSE;
+
+    pDir = m_pList->getFirstChild(pParentDir);
+
+    /* Allocate the iCount records which will be used as child. */
+
+    pChildRec = (DIRDATARECORD *)WinSendMsg (m_hwnd,
+                                       CM_ALLOCRECORD,
+                                       MPFROMLONG(sizeof(DIRDATARECORD) - sizeof(MINIRECORDCORE)),
+                                       MPFROMLONG(ulNumChildren));
+
+    pChildRecFirst = pChildRec;
+
+    for ( int i = 0; i < iCount && pDir; i++)
+    {
+        pChildRec->pDirData         = pDir; /* our ticket back to the internal data tree... */
+        pDir->pControlData          = (void *)pChildRec; /* from datatree to treecontrol data....   */
+        pChildRec->MiniRec.pszIcon  = pDir->szDisplayName; /* Text shown in tree */
+        pChildRec->MiniRec.hptrIcon = m_hptrFolderIcon;
+        pChildRec = (DIRDATARECORD *)pChildRec->MiniRec.preccNextRecord;
+        pDir = m_pList->getNext(pDir);
+    }
+    RecordInsert.cb                = sizeof(RECORDINSERT);
+    RecordInsert.pRecordOrder      = (PRECORDCORE)CMA_FIRST;
+    RecordInsert.pRecordParent     = (PRECORDCORE)pParentDir->pControlData;
+    RecordInsert.zOrder            = CMA_TOP;
+    RecordInsert.cRecordsInsert    = ulNumChildren;
+    RecordInsert.fInvalidateRecord = TRUE;
+
+    WinSendMsg (m_hwnd,
+                CM_INSERTRECORD,
+                MPFROMP(pChildRecFirst),
+                MPFROMP(&RecordInsert));
+
+//    addIncompleteNode(pChildRecFirst);
+    checkIncompleteNodes(pParentDir);    
+    return (rc);
+}
+
+/*----------------------------------------------------------------------*/
+BOOL dirCtrl::addTreeDriveList(XDIRLIST *pList, int iCount)
+{
+    DIRDATARECORD *  pChildRec, *pSingleRec;
+    DIRDATARECORD *  pChildRecFirst;
+    RECORDINSERT   RecordInsert;
+    BOOL           rc = TRUE;
+    ULONG          ulNumChildren = iCount;
+    XDIRDATA *     pDir;
+    XDIRDATA *     pDirFirst;
+    DIRDATARECORD * pFirstHardDrive;
+    if (!iCount || !pList)
+        return FALSE;
+
+
+    pDir      = pList->getBase();
+    pDirFirst = pDir;
+
+    pFirstHardDrive = NULL;
+    if (!pDir)
+        return FALSE;    
+
+    m_pList = pList;        /* tree control gets the list only here! */
+
+
+    /* Allocate the iCount records which will be used as child. */
+
+    pChildRec = (DIRDATARECORD *)WinSendMsg (m_hwnd,
+                                       CM_ALLOCRECORD,
+                                       MPFROMLONG(sizeof(DIRDATARECORD) - sizeof(MINIRECORDCORE)),
+                                       MPFROMLONG(ulNumChildren));
+
+    pChildRecFirst = pChildRec;
+
+    for ( int i = 0; i < iCount && pDir; i++)
+    {
+        pChildRec->pDirData         = pDir; /* our ticket back to the internal data tree... */
+        pDir->pControlData          = (void *)pChildRec; /* from datatree to treecontrol data....   */
+        pChildRec->MiniRec.pszIcon  = pDir->szDisplayName; /* Text shown in tree */
+
+        switch(pDir->iType)
+        {
+        case DSK_LANDRIVE:
+            pChildRec->MiniRec.hptrIcon = m_hptrNetDrvIcon;
+            break;
+        case DSK_HARDDRIVE:
+            pChildRec->MiniRec.hptrIcon = m_hptrHrdDrvIcon;
+            if (!pFirstHardDrive)
+                pFirstHardDrive = pChildRec;
+            break;
+        case DSK_FLOPPY:
+            pChildRec->MiniRec.hptrIcon = m_hptrFlpDrvIcon;
+            break;
+        case DSK_CDROM:
+            pChildRec->MiniRec.hptrIcon = m_hptrCdDrvIcon;
+            break;
+        default:
+            pChildRec->MiniRec.hptrIcon = m_hptrFolderIcon;
+            break;
+        }
+        pChildRec = (DIRDATARECORD *)pChildRec->MiniRec.preccNextRecord;
+        pDir = pList->getNext(pDir);
+    }
+    RecordInsert.cb                = sizeof(RECORDINSERT);
+    RecordInsert.pRecordOrder      = (PRECORDCORE)CMA_FIRST;
+    RecordInsert.pRecordParent     = (PRECORDCORE)0;
+    RecordInsert.zOrder            = CMA_TOP;
+    RecordInsert.cRecordsInsert    = ulNumChildren;
+    RecordInsert.fInvalidateRecord = TRUE;
+
+    WinSendMsg (m_hwnd,
+                CM_INSERTRECORD,
+                MPFROMP(pChildRecFirst),
+                MPFROMP(&RecordInsert));
+    /*
+    ** We give each drive an incomplete child to force the appearance of a '+'
+    */
+    addIncompleteNode(pChildRecFirst, TRUE);
+    /*
+    ** Set selection on first hard drive
+    */
+    if (pFirstHardDrive)
+    {
+        WinSendMsg (m_hwnd,CM_SETRECORDEMPHASIS,MPFROMP(pFirstHardDrive),MPFROM2SHORT(1,CRA_SELECTED) );
+    }
+    return (rc);
+}
+/*----------------------------------------------------------------------*/
+void dirCtrl::createFolderList(MPARAM mp2)
+{
+   comblock   *cmBlock;
+   TID         ThreadID;       /* New thread ID (returned)                   */
+   ULONG       ThreadFlags;    /* When to start thread,how to allocate stack */
+   ULONG       StackSize;      /* Size in bytes of new thread's stack        */
+   XDIRDATA   *pParent;
+
+    ThreadFlags = 0;        /* Indicate that the thread is to */
+                            /* be started immediately         */
+    StackSize = 14096;      /* Set the size for the new       */
+                            /* thread's stack                 */
+
+    pParent = ((DIRDATARECORD *)mp2)->pDirData;
+
+    if (!pParent)
+        return;
+
+    if (pParent->child)
+        return;
+
+    m_retryOption = ((DIRDATARECORD *)mp2);
+
+    cmBlock = (comblock *)malloc(sizeof(comblock));
+
+    cmBlock->hwnd    = m_hParent;
+    cmBlock->pParent = pParent;
+    cmBlock->pList   = m_pList;
+    cmBlock->mainParent = m_hMainParent;
+
+    makePathString(pParent,cmBlock->szFolder);
+    /*printf("Folder list for path=%s\n",cmBlock->szFolder);*/
+    DosCreateThread(&ThreadID,
+                    (PFNTHREAD)makeFolderList,
+                    (ULONG)cmBlock,
+                    ThreadFlags,
+                    StackSize);
+    return;
+}
+/*----------------------------------------------------------------------*/
+void dirCtrl::checkIncompleteNodes(XDIRDATA   *pParent)
+{
+   comblock   *cmBlock;
+   TID         ThreadID;       /* New thread ID (returned)                   */
+   ULONG       ThreadFlags;    /* When to start thread,how to allocate stack */
+   ULONG       StackSize;      /* Size in bytes of new thread's stack        */
+
+    ThreadFlags = 0;        /* Indicate that the thread is to */
+                            /* be started immediately         */
+    StackSize = 14096;      /* Set the size for the new       */
+                            /* thread's stack                 */
+
+    if (!pParent)
+        return;
+
+    cmBlock = (comblock *)malloc(sizeof(comblock));
+
+    cmBlock->hwnd    = m_hParent;
+    cmBlock->pParent = pParent;
+    cmBlock->pList   = m_pList;
+    cmBlock->mainParent = m_hMainParent;
+
+    makePathString(pParent,cmBlock->szFolder);
+    /*printf("Folder list for path=%s\n",cmBlock->szFolder);*/
+    DosCreateThread(&ThreadID,
+                    (PFNTHREAD)checkFolderList,
+                    (ULONG)cmBlock,
+                    ThreadFlags,
+                    StackSize);
+    return;
+
+}
+/*----------------------------------------------------------------------*/
+/* Name        : getDirectoryName                                       */
+/*                                                                      */
+/*                                                                      */
+/* Description : returns the directoryname selected in the control in   */
+/*               the given buffer.                                      */
+/*                                                                      */
+/* Parameters  : char *pszDir - pointer to a char buffer                */
+/*               int  iSize   - size of the given buffer                */
+/*                                                                      */
+/* returns     : BOOL - TRUE on success otherwise FALSE.                */
+/*----------------------------------------------------------------------*/
+BOOL dirCtrl::getDirectoryName( char *szBuf, int iSize)
+{
+    char szDir[CCHMAXPATH];
+    DIRDATARECORD *pRec = (DIRDATARECORD *)CMA_FIRST;
+
+    if (!m_pCurrent)
+    {
+        pRec = (DIRDATARECORD *)WinSendMsg (m_hwnd,
+                                           CM_QUERYRECORDEMPHASIS,
+                                           MPFROMP(pRec),
+                                           MPFROMSHORT( CRA_SELECTED));
+        if (pRec->pDirData)
+            return FALSE;   /* it seems to be connected, so its not a dummy! */
+    }
+    else
+    {
+        pRec = m_pCurrent;
+    }
+
+    makePathString(pRec->pDirData,szDir);
+
+    if ( strlen(szDir) > iSize )
+    {
+        memset(szBuf,0,iSize);
+        strncpy(szBuf,szDir,iSize-1);
+        return FALSE;
+    }
+    else
+    {
+        strcpy(szBuf,szDir);
+    }
+    return TRUE;
+}
+/*----------------------------------------------------------------------*/
+void dirCtrl::onTimerTick(void)
+{
+    char szDir[CCHMAXPATH];
+
+    if (m_bChanged && m_dirNotify && m_pCurrent)
+    {
+        makePathString(m_pCurrent->pDirData,szDir);
+
+        if (!stricmp(szDir,m_szTemp))
+        {
+            /*
+            ** Finally the user stopped running through the directory tree
+            ** and there seems to be a change. So send the user a message
+            ** with the new directoryname.
+            */
+            WinSendMsg(m_hMainParent,
+                       m_dirNotify,
+                       (MPARAM)m_szTemp,
+                       (MPARAM)(strlen(m_szTemp)+1));
+
+            strcpy(m_szDirectory,m_szTemp);
+            m_bChanged = FALSE;
+        }
+        strcpy(m_szTemp,szDir);
+    }    
+}
+/*---------------------------------------------------------------------------*/
+/* Name: processDrop                                                         */
+/*---------------------------------------------------------------------------*/
+MRESULT dirCtrl::processDrop( HWND hwnd, PCNRDRAGINFO pCnrDragInfo )
+{
+  PDRAGINFO     pDraginfo;
+  PRECORDCORE   pRecord;
+  PDRAGITEM     pDragItem;
+   char  szSourceFile[CCHMAXPATH];
+   char  szContain[CCHMAXPATH];
+   char  szFilename[CCHMAXPATH];
+   char  szCheck[CCHMAXPATH];
+   char  szFolder[CCHMAXPATH];
+   char  szWarning[50];
+   ULONG ulBytesWritten;
+   RECTL   rcl;
+   POINTL  ptlPos;
+   char    *p;
+   SHORT   xPos,yPos;
+   USHORT  usResponse;
+   PDRAGITEM pditem = NULL;
+   struct stat bf;
+   TID         ThreadID;       /* New thread ID (returned)                   */
+   ULONG       ThreadFlags;    /* When to start thread,how to allocate stack */
+   ULONG       StackSize;      /* Size in bytes of new thread's stack        */
+   USHORT      cItems,usIndex;
+   dropcopyblock *pBlock;
+   unsigned int  *pIAction;
+
+   DIRDATARECORD *pData;
+   pDraginfo =  pCnrDragInfo->pDragInfo;
+   /*
+   ** Get access to the Draginfo structure.
+   */
+   if(!DrgAccessDraginfo (pDraginfo))
+   {
+      printf("Drop DrgAccessDraginfo ERROR[%d]\n",WinGetLastError(habMain));
+      return (MRESULT)0;
+   }
+   pData = (DIRDATARECORD *)pCnrDragInfo->pRecord;
+   makePathString((XDIRDATA *)pData->pDirData,szFolder);
+
+   szWarning[0] = 0;
+
+   cItems = DrgQueryDragitemCount (pDraginfo);
+   
+   if (!(pDraginfo->usOperation == DO_COPY ||
+         pDraginfo->usOperation == DO_MOVE)  || szFolder[0] == 0)
+   {
+       DrgDeleteDraginfoStrHandles((PDRAGINFO)pDraginfo);
+       DrgFreeDraginfo(pDraginfo);
+
+       return (MRESULT)NULL;
+   }
+
+    pIAction = ( unsigned int *)calloc(sizeof(int),cItems);
+
+   for ( usIndex = 0;  usIndex < cItems; usIndex++)
+   {
+        pditem = DrgQueryDragitemPtr (pDraginfo,usIndex);
+        /*
+        ** Lets get the filename!
+        */
+        ulBytesWritten =DrgQueryStrName(pditem->hstrSourceName,
+                                      sizeof(szSourceFile),
+                                      (PSZ)szSourceFile);
+        if (!ulBytesWritten)
+         return (MRESULT)0;
+
+        ulBytesWritten =DrgQueryStrName(pditem->hstrContainerName,
+                                      sizeof(szContain),
+                                      (PSZ)szContain);
+        if (!ulBytesWritten)
+         return (MRESULT)0;
+
+        if (szContain[strlen(szContain)-1]!='\\')
+         sprintf(szFilename,"%s\\%s",szContain,szSourceFile);
+        else
+         sprintf(szFilename,"%s%s",szContain,szSourceFile);
+
+        printf("DROP:szFilename = %s  pDraginfo->usOperation = %d\n",szFilename,pDraginfo->usOperation);
+
+        if (szFolder[strlen(szFolder)-1]!='\\')
+            sprintf(szCheck,"%s\\%s",szFolder,szSourceFile);
+        else
+            sprintf(szCheck,"%s%s",szFolder,szSourceFile);
+
+        printf("Target %s Source %s\n",szCheck,szFilename);
+        
+        if (_stat(szCheck,&bf) == 0)
+        {
+            WinLoadString(habMain, (HMODULE)0, IDS_REPLACE_FILE ,
+                           CCHMAXPATH, (PSZ)szErrBuf);
+
+            sprintf(szCheck,(const char *)szErrBuf,szSourceFile);
+
+            if (!*szWarning)
+                WinLoadString(habMain, (HMODULE)0, IDS_WARNING ,
+                              50, (PSZ)szWarning);
+
+            usResponse = WinMessageBox(HWND_DESKTOP,hwnd,
+                                       (PSZ)szCheck,(PSZ)szWarning, 0,
+                                       MB_YESNOCANCEL | MB_APPLMODAL |
+                                       MB_MOVEABLE | 
+                                       MB_ICONQUESTION);
+            if ( usResponse == MBID_NO )
+            {
+                pIAction[usIndex]=UACT_SKIP;
+            }
+            else if ( usResponse == MBID_CANCEL )
+            {
+                DrgDeleteDraginfoStrHandles((PDRAGINFO)pDraginfo);
+                DrgFreeDraginfo(pDraginfo);
+                free(pIAction);
+                return (MRESULT)NULL;
+            }    
+            else
+                pIAction[usIndex]=UACT_OVERWRITE;
+        }
+        else
+        {
+            pIAction[usIndex]=UACT_NEWITEM;
+        }
+    }
+
+   if ( pDraginfo->usOperation == DO_COPY || pDraginfo->usOperation == DO_MOVE )
+   {
+         pBlock = ( dropcopyblock * )calloc(sizeof(dropcopyblock),1);
+         pBlock->hwndClient      = hwnd;
+         pBlock->pAction         = pIAction;
+         pBlock->pDragInfo       = pDraginfo;
+         pBlock->pszTargetFolder = strdup(szFolder);
+
+         ThreadFlags = 0;        /* Indicate that the thread is to */
+                                 /* be started immediately         */
+         StackSize = 14096;      /* Set the size for the new       */
+                                 /* thread's stack                 */
+         DosCreateThread(&ThreadID,(PFNTHREAD)fileCopyThread,
+                         (ULONG)pBlock,ThreadFlags,StackSize);
+     
+   }
+   else
+   {
+       printf("Drop no actions for us\n");
+       DrgDeleteDraginfoStrHandles((PDRAGINFO)pDraginfo);
+       DrgFreeDraginfo(pDraginfo);
+       free(pIAction);
+   }
+    return (MRESULT)NULL;
+}
+/*----------------------------------------------------------------------*/
+void dirCtrl::createDriveList( void )
+{
+   comblock   *cmBlock;
+   TID         ThreadID;       /* New thread ID (returned)                   */
+   ULONG       ThreadFlags;    /* When to start thread,how to allocate stack */
+   ULONG       StackSize;      /* Size in bytes of new thread's stack        */
+
+
+    ThreadFlags = 0;        /* Indicate that the thread is to */
+                            /* be started immediately         */
+    StackSize = 14096;      /* Set the size for the new       */
+                            /* thread's stack                 */
+
+    cmBlock = (comblock *)malloc(sizeof(comblock));
+
+    cmBlock->hwnd    = m_hParent; /* tell daddy when this thread is done (post um_drivelist ) */
+    cmBlock->pParent = NULL;
+
+    DosCreateThread(&ThreadID,
+                    (PFNTHREAD)makeDriveList,
+                    (ULONG)cmBlock,
+                    ThreadFlags,
+                    StackSize);
+
+    return;
+}
+/*----------------------------------------------------------------------*/
+/*  Name        : dirCtrl::dirCtrl                                      */
+/*                                                                      */
+/*  Description : Contructor                                            */
+/*                                                                      */
+/*  Parameters  : HAB - hab Anchor block handle.                        */
+/*                HWND hParent - parent window handle.                  */
+/*                long controlid - control id used in wincreatewindow.  */
+/*                ulong - ulNotify - message send to parent when dir    */
+/*                selection changes and is stable for some time.        */
+/*                must be bigger than WM_USER. Otherwise nothing is send*/
+/*                                                                      */
+/*                Both the controlid number and the first increment are */
+/*                used. Creating a second directory controls should be  */
+/*                with a controlid 2 higher                             */
+/*----------------------------------------------------------------------*/
+dirCtrl::dirCtrl(HAB hab, HWND hParent, long controlid, long flAttribute, 
+                 unsigned long  ulNotify )
+{
+    CNRINFO      CnrInfo;
+    BOOL         rc = TRUE;
+    LONG         fAttr = 0;
+    static CHAR szCircleClass[]    = "TREECOPYPROGRESS";
+
+    m_controlId = controlid+1;
+    m_parentId  = controlid;
+    m_hProgress = (HWND)0;
+    m_bChanged   = FALSE;    // Was there a selection done?
+    m_dirNotify  = 0;        // bigger than WM_USER means, start timer and notify parent on dir changes.
+
+    if (flAttribute == CV_MINI )
+        fAttr = CV_MINI;
+
+    WinRegisterClass (hab,"MessageCatcher",
+                      treeParentWndProc, CS_SIZEREDRAW,4);
+
+    WinRegisterClass( hab,                         // Another block handle
+                     (PSZ)szCircleClass,           // Name of class being registered
+                     (PFNWP)copyProgressBarWndProc,// Window procedure for class
+                     CS_SIZEREDRAW,                // Class style
+                     (BOOL)0);                     // Extra bytes to reserve
+
+    habMain = hab;
+    /* Create the parent window. */
+    m_hParent = WinCreateWindow (hParent,             /* Parent       */
+                         "MessageCatcher",            /* Class        */
+                         NULL,                        /* Window text  */
+                         WS_VISIBLE ,                 /* Window style */
+                         0,0,                         /* x,y          */
+                         0,0,                         /* cx, cy       */
+                         hParent,                     /* Owner        */
+                         HWND_TOP,                    /* placement    */
+                         controlid,                   /* Window ID    */
+                         NULL,                        /* Control data */
+                         NULL);                       /* presparams   */
+
+    WinSetWindowPtr (m_hParent, QWL_USER, this);
+
+    /* Create the container window. */
+    m_hwnd = WinCreateWindow (m_hParent,                    /* Parent       */
+                         WC_CONTAINER,                /* Class        */
+                         NULL,                        /* Window text  */
+                         WS_VISIBLE | CCS_EXTENDSEL | /* Window style */
+                         CCS_MINIRECORDCORE | CCS_MINIICONS,
+                         0,0,                         /* x,y          */
+                         0,0,                         /* cx, cy       */
+                         m_hParent,                   /* Owner        */
+                         HWND_TOP,                    /* placement    */
+                         m_controlId,                 /* Window ID    */
+                         NULL,                        /* Control data */
+                         NULL);                       /* presparams   */
+    m_pList     = NULL;
+    m_pCurrent  = NULL; /* No current selection yet */
+    if (m_hwnd)
+    {
+        m_hMainParent = hParent;
+        m_dirNotify   = ulNotify;
+
+        CnrInfo.flWindowAttr = CV_TREE | CV_ICON | CA_TREELINE |
+                               CA_TITLEREADONLY  | fAttr;
+
+        CnrInfo.pszCnrTitle = "";
+        
+        m_hptrFolderIcon = WinLoadPointer (HWND_DESKTOP,NULLHANDLE,ID_FOLDER_ICON);
+        m_hptrNetDrvIcon = WinLoadPointer (HWND_DESKTOP,NULLHANDLE,ID_NETDRV_ICON);
+        m_hptrHrdDrvIcon = WinLoadPointer (HWND_DESKTOP,NULLHANDLE,ID_HRDDRV_ICON);
+        m_hptrFlpDrvIcon = WinLoadPointer (HWND_DESKTOP,NULLHANDLE,ID_FLPDRV_ICON);
+        m_hptrCdDrvIcon  = WinLoadPointer (HWND_DESKTOP,NULLHANDLE,ID_CDDRV_ICON);
+
+        WinSendMsg (m_hwnd, CM_SETCNRINFO,
+                    MPFROMP(&CnrInfo), 
+                    MPFROMLONG(CMA_FLWINDOWATTR | CMA_CNRTITLE));
+
+        WinSetPresParam(m_hwnd,PP_FONTNAMESIZE,(ULONG)strlen("8.Helv")+1,(void *)"8.Helv");
+        /*
+        ** Start a thread which builds up the initial drive list. 
+        ** e.g the root of it all....
+        */
+        createDriveList(); /* Post my parent a message when done... */
+
+        /* Give the container the focus and return. */
+        WinSetFocus (HWND_DESKTOP, m_hwnd);
+
+        /* Start timer for notification when ulNotify > WM_USER */
+        if (ulNotify > WM_USER )
+            WinStartTimer ((HAB)0,m_hParent,0,DIR_TIMEOUT);
+    }
+}
+/*---------------------------------------------------------------------------*/
+dirCtrl::~dirCtrl()
+{
+    USHORT cNumRecord;             /* Number of records to be removed     */
+    USHORT fRemoveRecord;          /* Container message attributes        */
+
+    if (m_pList)
+        delete m_pList;
+
+
+ /**********************************************************************/
+ /*  Zero means remove all records.                                    */
+ /**********************************************************************/
+    cNumRecord = 0;
+ 
+    fRemoveRecord =  CMA_FREE;
+ 
+ /**********************************************************************/
+ /*  Remove the records.                                               */
+ /**********************************************************************/
+ WinSendMsg(m_hwnd,             /* Container window handle             */
+   CM_REMOVERECORD,             /* Container message for removing      */
+                                /* records                             */
+   NULL,                        /* NULL PRECORDARRAY                   */
+   MPFROM2SHORT(
+     cNumRecord,                /* Number of records                   */
+     fRemoveRecord));           /* Memory invalidation flags           */
+ 
+
+    /* Free the icons we used */
+    WinDestroyPointer (m_hptrFolderIcon);
+    WinDestroyPointer (m_hptrNetDrvIcon);
+    WinDestroyPointer (m_hptrHrdDrvIcon);
+    WinDestroyPointer (m_hptrFlpDrvIcon);
+    WinDestroyPointer (m_hptrCdDrvIcon);
+
+    // turn on error popups for removables with no media
+    DosError( FERR_ENABLEEXCEPTION | FERR_ENABLEHARDERR );
+
+}
+/*---------------------------------------------------------------------------*/
+MRESULT dirCtrl::WndProc (HWND hwnd, ULONG msg, MRESULT mp1, MRESULT mp2)
+{
+    SWP          swp;
+    HPS          hps;
+    RECTL        rect;
+    PNOTIFYRECORDEMPHASIS pNotify;
+    DIRDATARECORD *pDir;
+    char         szDir[CCHMAXPATH];
+    static       BOOL bActive;
+
+    switch (msg)
+    {
+
+    case WM_CREATE:
+        return (MRESULT)0;
+
+    case WM_PAINT:
+        hps = WinBeginPaint (hwnd, NULLHANDLE, &rect);
+        WinFillRect (hps, &rect, CLR_PALEGRAY);
+        WinEndPaint (hps);
+        return (MRESULT)0;
+
+      case UM_SHOWPROGRESS:
+          if (!m_hProgress)
+          {
+             m_hProgress = WinLoadDlg(HWND_DESKTOP,hwnd,
+                                      (PFNWP)fileCopyDlgProc,(HMODULE)0,
+                                      DLG_PROGRESS,NULL);
+          }
+          return 0;
+      case UM_SHOWFILENAME:
+          if (m_hProgress)
+            WinSendMsg(m_hProgress,msg,mp1,mp2);
+          else if (mp1)
+              free((void *)mp1);
+          return 0;
+
+      case UM_CLOSEPROGRESS:
+          if (m_hProgress)
+          {
+              WinDismissDlg( m_hProgress, TRUE );
+              m_hProgress = 0;
+          }
+          return 0;
+
+     case UM_DOSERROR:
+         if (m_hProgress)
+         {
+             WinDismissDlg( m_hProgress, TRUE );
+             m_hProgress = 0;
+         }
+
+         if (!bActive)
+         {
+            bActive = TRUE;
+            WinMessageBox(HWND_DESKTOP,hwnd,
+                                   (PSZ)mp1,(PSZ)"ERROR", 0,
+                                   MB_OK | MB_APPLMODAL |
+                                   MB_MOVEABLE |
+                                   MB_ICONEXCLAMATION);
+            bActive = FALSE;
+        }
+        free((void *)mp1);
+        return (MRESULT)0;
+
+    case UM_DRIVELIST:
+        addTreeDriveList((XDIRLIST *)mp1, (int)mp2);
+        return (MRESULT)0;
+
+    case UM_FOLDERLIST:
+        addFolderList((XDIRDATA *)mp1,(int)mp2);
+        return (MRESULT)0;
+
+    case  UM_DRIVE_NOT_READY:      
+        if (WinMessageBox(HWND_DESKTOP,
+                          m_hMainParent,
+                          "Drive not ready",
+                          "Error",0,
+                          MB_MOVEABLE | MB_ERROR | MB_RETRYCANCEL) == MBID_RETRY)
+        {
+            createFolderList(getRetryOption());
+        }
+        return (MRESULT)0;
+
+    case UM_ADD_INCOMPLETE:
+        addIncompleteNode((DIRDATARECORD *)mp1,FALSE);
+        return (MRESULT)0;
+    case WM_SIZE:
+        swp.fl = SWP_MOVE | SWP_SIZE;
+        swp.x = swp.y = 0;
+        swp.cx = (SHORT1FROMMP(mp2));
+        swp.cy = (SHORT2FROMMP(mp2));
+        swp.hwndInsertBehind = NULLHANDLE;
+        swp.hwnd = WinWindowFromID (hwnd, getControlId());
+        WinSetMultWindowPos (WinQueryAnchorBlock (hwnd), &swp, 1);
+        break;
+        /*
+        ** wm_control should be handled elsewhere....
+        */
+    case WM_TIMER:
+        onTimerTick();
+        return 0;
+    case WM_CONTROL:
+        switch (SHORT2FROMMP( mp1 ))
+        {
+        case CN_EMPHASIS:
+            pNotify = (PNOTIFYRECORDEMPHASIS)mp2;
+            if (pNotify && pNotify->fEmphasisMask & CRA_SELECTED)
+            {
+                /*
+                ** Get via the RECORDCORE our recordData stuff
+                */
+                setCurrentSelection((DIRDATARECORD *)pNotify->pRecord);
+            }
+            break;
+        case CN_EXPANDTREE:
+            createFolderList(mp2);
+            break;
+        case CN_DRAGOVER:
+          return(MRFROM2SHORT(DOR_DROP, DO_MOVE));
+        case CN_DROP:
+          return processDrop(hwnd,(PCNRDRAGINFO)(PVOIDFROMMP(mp2)) );
+        }
+    }
+    return (WinDefWindowProc (hwnd, msg, mp1, mp2));
+}
+/*---------------------------------------------------------------------------*/
+/* Name       : treeParentWndProc                                            */
+/*                                                                           */
+/* Description: It is the owner of the container control window.             */
+/*                                                                           */
+/*---------------------------------------------------------------------------*/
+MRESULT EXPENTRY treeParentWndProc (HWND hwnd, ULONG msg, MRESULT mp1, MRESULT mp2)
+{
+
+    dirCtrl  *pTree = (dirCtrl *)WinQueryWindowPtr (hwnd, QWL_USER);
+
+    if (pTree)
+        return pTree->WndProc(hwnd,msg,mp1,mp2);
+    
+    switch (msg)
+    {
+
+    case WM_CREATE:
+        return (MRESULT)0;
+    }
+    return (WinDefWindowProc (hwnd, msg, mp1, mp2));
+}
+
+/*---------------------------------------------------------------------------*/
+/* Parameters   : HWND hwnd - Window handle.                                 */
+/*                                                                           */
+/* returns      : MRESULT - Message result.                                  */
+/*---------------------------------------------------------------------------*/
+MRESULT EXPENTRY copyProgressBarWndProc(HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2)
+{
+   HPS hps;
+   RECTL  rcl;
+   static int count;
+   static int iTotal;
+   static int iFitt;
+   int iNr,x;
+   POINTL ptl,ptle;
+
+   switch(msg)  
+   {
+   case UM_COUNTFILES:
+       iTotal = (int)mp2;
+       return 0;
+    case UM_SHOWFILENAME:
+        count++;
+        WinQueryWindowRect(hwnd,&rcl);
+        iFitt = (rcl.xRight/10);
+        return 0;
+      case WM_CREATE:
+         count = 0;
+         return (MRESULT)0;
+      case WM_PAINT:
+         WinQueryWindowRect(hwnd,&rcl);         
+         hps = WinBeginPaint (hwnd,(HPS)0,&rcl);
+         WinFillRect(hps,&rcl,CLR_PALEGRAY);
+         WinDrawBorder(hps, &rcl,1L,1L,0L, 0L,DB_DEPRESSED);
+         if (!iTotal)
+             iTotal = 1;
+
+         ptl.x = 4;
+         ptl.y = 4;
+         ptle.x = 10;
+         ptle.y = 10;
+         if (iTotal < iFitt)
+            iNr = (iFitt / iTotal)+1;
+         else if (iTotal == 1)
+             iNr = iFitt;
+         else
+            iNr = 1;
+         GpiSetColor(hps,CLR_BLUE);
+         for ( int i = 0; i < count; i++)
+         {
+             for ( x = 0; x < iNr; x++)
+             {
+                 GpiMove(hps,&ptl);
+                 GpiBox(hps,DRO_FILL,&ptle,0,0);
+                 ptl.x += 12;
+                 ptle.x+= 12;
+             }
+         }
+         WinEndPaint(hps);
+         return 0;
+   }
+   return (WinDefWindowProc(hwnd,msg,mp1,mp2));
+}
+/*------------------------------------------------------[ private ]-------*/
+MRESULT EXPENTRY fileCopyDlgProc(HWND hwnd, USHORT msg, MPARAM mp1, MPARAM mp2 )
+{
+    static BOOL    bInit;
+    static HWND    hProgress;
+    SWP    swp;    /* Screen Window Position Holder     */
+   
+
+    switch (msg)
+    {
+    case WM_INITDLG:
+        bInit = TRUE;
+           /* Centre dialog	on the screen			*/
+        WinQueryWindowPos(hwnd, (PSWP)&swp);
+        WinSetWindowPos(hwnd, HWND_TOP,
+           ((WinQuerySysValue(HWND_DESKTOP,	SV_CXSCREEN) - swp.cx) / 2),
+           ((WinQuerySysValue(HWND_DESKTOP,	SV_CYSCREEN) - swp.cy) / 2),
+           0, 0, SWP_MOVE);
+        hProgress = WinWindowFromID(hwnd, ID_TREEPROGRESSWND);
+        bInit = FALSE;
+        return 0;
+
+    case WM_COMMAND:
+        switch(LOUSHORT(mp1))
+	    {
+        case DID_CANCEL:
+            return 0;
+        }
+        return 0;
+    case UM_COUNTFILES:
+        WinSendMsg(hProgress,msg,mp1,mp2);
+        return 0;
+
+    case UM_SHOWFILENAME:
+        WinSendMsg(hProgress,msg,mp1,mp2);
+        WinSetDlgItemText (hwnd,TXT_FILENAME,(PSZ)mp1);
+        WinInvalidateRect (hProgress,NULL,FALSE);
+        free((void *)mp1);
+        return 0;
+
+    }
+    return(WinDefDlgProc(hwnd, msg, mp1, mp2));
+}
+/*----------------------------------------------------------------------*/

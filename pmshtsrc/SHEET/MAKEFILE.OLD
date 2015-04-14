@@ -1,0 +1,35 @@
+#---------------------------------
+# pictuer sheet.  
+#---------------------------------
+JPEG       = \DRW29\JPEG
+
+CC         = icc /c /ti /I$(JPEG) /O- /Ge /Gd- /Se /Re /ss /Gm+ /sm
+
+sheet.obj : sheet.cpp
+   $(CC) sheet.cpp
+
+shtdir.obj : shtdir.cpp
+   $(CC) shtdir.cpp
+
+shtjpg.obj : shtjpg.c
+   $(CC) shtjpg.c
+
+sheet.res : sheet.rc
+   rc -r sheet.rc
+
+sheet.exe : sheet.obj shtdir.obj shtjpg.obj sheet.res
+   ilink /nofree /CODE /ALIGN:4 /NOLOGO /PMTYPE:PM @<< <<sheet.def 
+sheet.obj shtdir.obj shtjpg.obj,
+$@,
+sheet.map,
+os2386 \DRW29\JPEG\libjpeg.lib,
+sheet.def
+<<NOKEEP
+NAME            sheet      WINDOWAPI
+DESCRIPTION     '(c) Jasper de Keijzer, 1994'
+PROTMODE
+DATA            MULTIPLE
+HEAPSIZE        18092
+STACKSIZE       55000
+<<NOKEEP
+   rc sheet.res sheet.exe

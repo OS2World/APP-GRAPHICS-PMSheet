@@ -1,0 +1,33 @@
+#---------------------------------
+# MAKEFILE.
+#---------------------------------
+
+CC         = icc /c /ti /W3 /O- /Ge /Gd- /Se /Re /ss /Gm+ /sm
+
+
+explore.obj : explore.cpp
+   $(CC) explore.cpp
+
+dirctrl.obj : dirctrl.cpp
+   $(CC) dirctrl.cpp
+
+dirctrl.res: dirctrl.rc
+   rc -r dirctrl.rc
+
+explore.exe : explore.obj dirctrl.obj dirctrl.res
+   ilink /NOFREE /CODE /ALIGN:16 @<< <<explore.def 
+explore.obj dirctrl.obj,
+$@,
+explore.map,
+os2386,
+explore.def
+<<NOKEEP
+NAME            explore      WINDOWAPI
+DESCRIPTION     '(c) Jasper de Keijzer, 1995'
+PROTMODE
+DATA            MULTIPLE
+HEAPSIZE        8192
+STACKSIZE       8192
+EXPORTS	        ClientWndProc
+<<NOKEEP
+   rc dirctrl.res explore.exe

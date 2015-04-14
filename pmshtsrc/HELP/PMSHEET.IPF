@@ -1,0 +1,112 @@
+:userdoc.
+.*--------------------------------------------------------------*\
+.*  Main Help menu
+.*      res = PANEL_HELP
+.*--------------------------------------------------------------*/
+:h1 res=2910 name=PANEL_HELP.Getting Started.
+:i1. Getting Started
+:p.
+:hp2.PMSheet:ehp2.
+.br
+PMSheet is a file explorer like program which shows the images in a selected directory.
+The toolbar or menu enables you to apply functions to the selected images 
+which are displayed in the right window.
+:p.
+:hp2.Making selections:ehp2.
+.br
+A selection is shown by a thin blue box around the thumbnail image.
+Selections can be made with the mouse like you do in a folder.
+Multiple selections can be made with key combinations like
+<Shift> or the <Ctrl>. See your OS/2 documentation on selections
+in folders. Arrow keys can be used as well.
+:p.
+:hp2.Detail:ehp2.
+.br
+:artwork  align=left name='..\tbar\zoom.bmp'.
+Only for a single selected image the details can be shown. 
+To show the image detail, you can either use the menu or toolbar or
+the <enter> key. The ESC key restores the previous state.
+:p.
+:hp2.Drag Drop:ehp2.
+.br
+Drag and drop works on the current selected images. All images can be dragged
+to another folder or even to a folder in the tree which is on the left side of the program.
+Be aware that the program always makes copies and never does a file move.
+The program allows the drag and drop on mulitple objects but dot show this during
+a drag operation.
+:p.
+:hp2.Slideshow:ehp2.
+.br
+:artwork  align=left name='..\tbar\project.bmp'.
+Shows the selected images in a slideshow with an interval of approx 4 sec. First
+image shortly shows a white line telling that the load is in progress. 
+:p.
+:hp2.Rotating images:ehp2.
+.br
+:artwork  align=left name='..\tbar\rotleft.bmp'.
+Image can be rotated clock and counter clock wise, 90 degrees at the time. Be
+aware that JPEG images loose quality when rotating is done.
+:p.
+:hp2.Sorting images:ehp2.
+.br
+:artwork  align=left name='..\tbar\srtname.bmp'.
+Images can be sorted on name and on size. The options are available in the
+toolbar an in the menu.
+:p.
+:hp2.Deleting images:ehp2.
+.br
+:artwork  align=left name='..\tbar\trash.bmp'.
+Deletion works on the selected images. A deletion can be done by pressing the
+Delete key or clicking on the toolbar button with the bin and last but not
+least, you can drag the image(s) to the system schredder.
+:p.
+:hp2.Quit:ehp2.
+.br
+I cannot imagine you wanna leave this program, but if you want
+you can press the F3 function key.
+.*--------------------------------------------------------------*\
+.*  Help menu About command help panel
+.*      res = PANEL_HELPABOUT
+.*--------------------------------------------------------------*/
+:h1 res=2960 name=PANEL_HELPABOUT.About.
+:i1. About
+:hp2.About PMSheet 2.0 for OS/2 Warp:ehp2.
+.br
+PMSheet version 2.0 includes a perfomance upgrade for loading JPEG
+images and some user interface updates to make is more friendly.
+.br
+PMSheet is a freeware program and may be copied freely. It is build 
+with the help of open source technology for reading image files.
+For JPEG, the library sources of the Independent JPEG Group's software are used. 
+Thanks Thomas G. Lane for the hard work on JPEG.
+For the other formats the GBMSRC ( Generic Bitmap Sources ) are used. 
+Thanks Andy Key for supplying the sources on the internet.
+:p.
+Have fun with it.
+:p.
+Jasper de Keijzer
+.br
+If you want to mail be sure you put in the subject "PMSHEET" in capitals
+otherwise I might look over it. Caused by the 250 spam mails a day.
+.br
+jasper.dekeijzer@worldonline.nl
+.*--------------------------------------------------------------*\
+.*  Help menu About command help panel
+.*      res = PANEL_HELPABOUT
+.*--------------------------------------------------------------*/
+:h1 res=2970 name=PANEL_HELPTODO.Todo
+:i1. Todo
+:hp2.Things I think are important for a next version:ehp2.
+:sl.
+:li.Printing.
+:li.Configuration, Interval time for slideshow
+:li.Open interface, so you can add your own image formats.
+:li.Rename of images.
+:li.Other languages. If you think you can translate a help file and resource file than please let me know.
+:esl.
+:p.
+It will take long, since I suffer from RSI.
+.br
+Initial development time 1 juli 2002 - 24 june 2003.
+:euserdoc.
+

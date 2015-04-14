@@ -1,0 +1,25 @@
+   hstrRMF   = DrgAddStrHandle ((PSZ)"<DRM_OS2FILE,DRF_BITMAP>,<DRM_DISCARD,DRF_BITMAP>");
+
+
+
+ 
+ Cause: 
+
+ This message is sent to a source that supports the "DRM_DISCARD" rendering 
+ method. 
+
+ Parameters: 
+
+ param1
+     PDRAGINFO pDragInfo Pointer.
+ 
+ param2
+     MPARAM    param2    Reserved.
+ 
+ returns
+     ULONG     ulAction  Flag.
+ 
+ 
+
+
+
