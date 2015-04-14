@@ -1,0 +1,2601 @@
+#define INCL_DOSFILEMGR   /* File Manager values */
+#define INCL_DOSERRORS
+#define INCL_DOS
+#define INCL_WIN
+#define INCL_GPI
+#include <os2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "shtimg.h"
+#include "shtdir.hpp"
+#include "sheet.hpp"
+#include "..\resource.h"
+
+#define DEBUG
+#define PICTHREADSTACK 45000
+#define INERNAL_PIC_SIZE       320
+#define PIC_SPATIE               5
+
+#define DB_RAISED    0x0400	    /* the undocumented value's */
+#define DB_DEPRESSED 0x0800     /* drawbox.                 */
+#define SLIDE_BORDER 4
+#define AT_WORKSIZE  40
+extern "C" BOOL readjpeg(HWND hwndClient,char *pszFilename, pImage pImg);
+extern "C" BOOL readPicture(HWND hwndClient,char *pszFilename, pImage pImg);
+extern "C" BOOL imgRotate(IMAGE * pImg,int degrees);
+extern "C" BOOL writePicture(HWND hwndClient,char *pszFilename, pImage pImg);
+extern "C" BOOL writejpeg(HWND hwndClient,char *pszFilename, pImage pImg);
+
+extern BOOL CreateBitmapHdcHps( PHDC phdc, PHPS phps);
+
+static BOOL readImageFromDisk(HWND hwnd, char *pszFileName,IMAGE * dfImg);
+
+static LOADERDEF loaddef; /* used to contain the defaults */
+static IMAGE     defImg;
+static BOOL      bCancelLoad;
+static BOOL      bCancelDetailLoad;
+hPicture         *pErrorState;  /* in case of error */
+int              iTotal;        /* in case of error */
+int              iLoading;      /* in case of error */
+/*
+** Thread variables for multithreaded loading of a pic file.
+*/
+TID         ThreadID;       /* New thread ID (returned)                   */
+ULONG       ThreadFlags;    /* When to start thread,how to allocate stack */
+ULONG       StackSize;      /* Size in bytes of new thread's stack        */
+
+HDIR          hDir;
+FILEFINDBUF3  FindBuffer;
+ULONG         FindCount;
+
+
+long hPicture::m_lCharHeight;
+HPS  hPicture::m_hpsMem;
+
+static char *suppExt[] = {"jpg","gif","tif","bmp","pcx",0};
+
+static BOOL isSupported( char *pszFileName )
+{
+    char *p;
+
+    p = strchr(pszFileName,'.');
+    if (p)
+    {
+        p++;
+        for (int i =0; suppExt[i] ; i++)
+        {
+            if ( !stricmp(p,suppExt[i]) )
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+/*---------------------------------------------------------------------------*/
+void cancelLoad( BOOL bCancel)
+{
+   bCancelLoad = bCancel;
+}
+/*---------------------------------------------------------------------------*/
+void cancelDetailLoad(BOOL bCancel)
+{
+    bCancelDetailLoad = bCancel;
+}
+/*---------------------------------------------------------------------------*/
+static void errorDosCopy(HWND hParent,int iret )
+{
+    char szErrBuf[CCHMAXPATH];
+
+    memset(szErrBuf,0,CCHMAXPATH);
+
+    switch(iret)
+    {
+    case ERROR_FILE_NOT_FOUND:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_FILE_NOT_FOUND,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_PATH_NOT_FOUND:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_PATH_NOT_FOUND,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_ACCESS_DENIED :
+        WinLoadString((HAB)0,(HMODULE)0,IDS_ACCESS_DENIED,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_NOT_DOS_DISK:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_NOT_DOS_DISK,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_SHARING_VIOLATION:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_SHARING_VIOLATION,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_SHARING_BUFFER_EXCEEDED:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_SHARING_BUFFER_EXCEEDED,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_INVALID_PARAMETER: 
+        WinLoadString((HAB)0,(HMODULE)0,IDS_INVALID_PARAMETER,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_FILENAME_EXCED_RANGE:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_FILENAME_EXCED_RANGE,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    case ERROR_WRITE_PROTECT:
+        WinLoadString((HAB)0,(HMODULE)0,IDS_WRITE_PROTECT,CCHMAXPATH, (PSZ)szErrBuf);
+        break;
+    default:
+        sprintf(szErrBuf,"unknown error..%d..",iret);
+        break;
+    }
+    WinPostMsg(hParent,UM_DOSERROR,(MPARAM)strdup(szErrBuf),(MPARAM)0);
+
+}
+/*---------------------------------------------------------------------------*/
+/*                                                                           */
+/* Create a memory DC and an associated PS.                                  */
+/*                                                                           */
+/*---------------------------------------------------------------------------*/
+static BOOL CreateMemoryHdcHps(HAB hab, PHDC phdc, PHPS phps)
+{
+  SIZEL    sizl;
+  HDC      hdc;
+  HPS      hps;
+
+  hdc = DevOpenDC(hab,OD_MEMORY,(PSZ)"*",0L,NULL,NULLHANDLE);
+  if( !hdc)
+    return( FALSE);
+
+  sizl.cx = sizl.cy = 0L;
+  hps = GpiCreatePS( hab , hdc, &sizl, PU_PELS | GPIA_ASSOC | GPIT_MICRO );
+
+  if( !hps)
+    return( FALSE);
+
+  *phdc = hdc;
+  *phps = hps;
+  return( TRUE);
+}
+/*---------------------------------------------------------------------------*/
+void setAspectRatio(long *bcx, long *bcy)
+{
+     
+     long  xSize    = INERNAL_PIC_SIZE;
+     long  ySize    = INERNAL_PIC_SIZE;
+     float fAspect;
+
+     if (*bcx > *bcy )
+     {
+        /* landscape picture */
+         fAspect =  (float)*bcy;
+         fAspect /= (float)*bcx;
+         ySize    = (int)(fAspect * xSize);
+     }
+     else if (*bcy > *bcx )
+     {
+         fAspect =  (float)*bcx;
+         fAspect /= (float)*bcy;
+         xSize    = (int)(fAspect * ySize);
+     }
+
+//     printf("setAspectRatio cx[%d]->[%d] cy[%d]->[%d]\n",*bcx,xSize,*bcy,ySize);
+     *bcx = xSize;
+     *bcy = ySize;
+    
+}
+/*---------------------------------------------------------------------------*/
+static BOOL reduceBitmapSize(hPicture *pPicture, HAB hab, PBITMAPINFOHEADER2 pbmp2,unsigned char *pImgData)
+{
+   HBITMAP   bmap;
+   HBITMAP   hbm;
+   HDC       hdcMem,hdcMemTemp;
+   HPS       hpsMem,hpsMemTemp;
+   POINTL    aBitmap[4];
+   BITMAPINFOHEADER2 bmpMemory;
+   SIZEL     sizlWork;
+   POINTL    ptl;
+   BOOL      bRet = TRUE;
+   char      errbf[125];
+   BYTE      *pByte;
+   PRGB2     pRGB2,pPal;
+   long      cxSize,cySize;
+   PBITMAPINFOHEADER2 new_pbmi;
+   BITMAPFILEHEADER2 bfh;   /* includes the bitmapinfoheader2 at the end*/
+   PBITMAPINFO2      pbmi;  /* is infoheader2 + pointer to rgb table    */
+   PBYTE             pbScan;
+   ULONG             lBmpDataSize;
+   USHORT            sScanLineSize;
+   USHORT            nColors;
+   ULONG             sScans;
+   ULONG             i;
+   char *p;
+
+//   printf("ENTER reducebitmap size\n");
+
+   if (!pbmp2 || !pImgData)
+   {
+//      printf("ERROR: no img data or header!\n");
+      return FALSE;
+   }
+
+
+   sScanLineSize = ((pbmp2->cBitCount * pbmp2->cx + 31) / 32) * 4 *
+                     pbmp2->cPlanes;
+
+   lBmpDataSize  = (LONG) sScanLineSize * pbmp2->cy ;
+
+
+//   printf("OLD Bitmap datasize = %ld\n",lBmpDataSize);
+
+   /*
+   ** remember some originals
+   */
+   pPicture->setImageInfo(pbmp2);
+
+   if (pbmp2->cx < INERNAL_PIC_SIZE && pbmp2->cy < INERNAL_PIC_SIZE )
+      return FALSE;
+
+
+   CreateMemoryHdcHps(hab, &hdcMem,&hpsMem);
+
+   GpiCreateLogColorTable ( hpsMem,LCOL_RESET,LCOLF_RGB, 0, 0, NULL );
+
+   memset (&bmpMemory,0, sizeof(BITMAPINFOHEADER2));
+
+   cxSize = (LONG)pbmp2->cx;
+   cySize = (LONG)pbmp2->cy;
+
+   setAspectRatio(&cxSize,&cySize);
+
+   if (pbmp2->cBitCount == 24)
+   {
+      bmpMemory.cbFix           = sizeof(bmpMemory);
+      bmpMemory.cx              = (USHORT)cxSize;
+      bmpMemory.cy              = (USHORT)cySize;
+      bmpMemory.cPlanes         = 1L;
+      bmpMemory.cBitCount       = 24L;
+      bmpMemory.ulCompression   = BCA_UNCOMP;
+      bmpMemory.cxResolution    = 0;
+      bmpMemory.cyResolution    = 0;
+      bmpMemory.cclrUsed        = 0;
+      bmpMemory.cclrImportant   = 0;
+      bmpMemory.usUnits         = BRU_METRIC;
+      bmpMemory.usRecording     = BRA_BOTTOMUP;
+      bmpMemory.usRendering     = BRH_NOTHALFTONED;
+      bmpMemory.cSize1          = 0;
+      bmpMemory.cSize2          = 0;
+      bmpMemory.ulColorEncoding = BCE_RGB;
+      bmpMemory.ulIdentifier    = 0;
+   }
+   else
+   {
+      memcpy(&bmpMemory,pbmp2,sizeof(BITMAPINFOHEADER2));
+
+      bmpMemory.cx              = (USHORT)cxSize;
+      bmpMemory.cy              = (USHORT)cySize;
+
+      pByte = (BYTE *)pbmp2;
+      pRGB2 = (RGB2 *)(sizeof(BITMAPINFOHEADER2));
+
+      nColors = 1 << ( pbmp2->cBitCount * pbmp2->cPlanes );
+   }
+
+   
+   bmap = GpiCreateBitmap(hpsMem,(PBITMAPINFOHEADER2)&bmpMemory,
+                          0L,(PBYTE)NULL,(PBITMAPINFO2)NULL);
+
+//   printf("GpiCreateBitmap cx=%d cy=%d\n",cxSize,cySize);
+
+   if (!bmap)
+   {
+//      printf("ERROR: GpiCreateBitmap\n");
+
+      GpiAssociate(hpsMem, (HDC)0L);
+      GpiDestroyPS(hpsMem);
+      DevCloseDC(hdcMem);
+      return FALSE;
+   }
+
+   GpiSetBitmap(hpsMem,bmap);
+
+   aBitmap[0].x = (LONG)0;
+   aBitmap[0].y = (LONG)0;
+   aBitmap[1].x = (long)cxSize;
+   aBitmap[1].y = (long)cySize;
+   aBitmap[2].x = 0;             // Source Lower LH Corner
+   aBitmap[2].y = 0;
+   aBitmap[3].x = pbmp2->cx-1;   // Source Upper RH Corner
+   aBitmap[3].y = pbmp2->cy-1;
+
+   CreateMemoryHdcHps(hab, &hdcMemTemp,&hpsMemTemp);
+
+//   printf("GpiCreateBitmap\n");
+
+   hbm = GpiCreateBitmap(hpsMemTemp,/* presentation-space handle */
+                         pbmp2,     /* address of structure for format data */
+                         CBM_INIT,  /* options     */
+                         (PBYTE)pImgData,  /* bitmap data */
+                         (PBITMAPINFO2)pbmp2); /* address of structure for color and format */
+
+
+   GpiWCBitBlt(hpsMem,hbm,4L,aBitmap, ROP_SRCCOPY,      /* copy source replacing target            */
+                                      BBO_IGNORE);      /* discard extra rows and columns          */
+
+
+//   printf("BlitSize cx=%d cy = %d\n",cxSize,cySize);
+
+   // Get bitmap information
+
+   memset(&bfh,0,sizeof(BITMAPFILEHEADER2));
+
+   bfh.usType   = BFT_BMAP;   /* 'BM' */
+   bfh.xHotspot = 0;
+   bfh.yHotspot = 0;
+   bfh.offBits  = 0;
+   bfh.bmp2.cbFix = sizeof (BITMAPINFOHEADER2);
+
+   bRet = GpiQueryBitmapInfoHeader( bmap, &bfh.bmp2);
+
+
+//   printf("GpiQueryBitmapInfoHeader cx=%d cy=%d\n",bfh.bmp2.cx,bfh.bmp2.cy);
+
+   sScanLineSize = ((bfh.bmp2.cBitCount * bfh.bmp2.cx + 31) / 32) * 4 *
+                     bfh.bmp2.cPlanes;
+
+   lBmpDataSize  = (LONG) sScanLineSize * bfh.bmp2.cy ;
+
+//   printf("NEW Bitmap datasize = %ld\n",lBmpDataSize);
+
+
+   nColors = 1 << (bfh.bmp2.cBitCount * bfh.bmp2.cPlanes);
+
+   bfh.usType = BFT_BMAP;   /* 'BM' */
+   bfh.cbSize = sizeof(BITMAPFILEHEADER2);
+   bfh.xHotspot = 0;
+   bfh.yHotspot = 0;
+   bfh.offBits  = 0;
+
+   // Create memory DC and PS, and set bitmap in it
+   // Allocate memory for BITMAPINFO table & scans
+
+   new_pbmi = (PBITMAPINFOHEADER2)calloc( sizeof(BITMAPINFOHEADER2) + (nColors * sizeof(RGB2)),1);
+
+   memcpy((void *)new_pbmi,&bfh.bmp2,sizeof(BITMAPINFOHEADER2));
+
+   pbScan = (BYTE *)calloc(lBmpDataSize,sizeof(char));
+
+   sScans = GpiQueryBitmapBits (hpsMem,
+                                0L, bfh.bmp2.cy, pbScan,(PBITMAPINFO2)new_pbmi);
+
+
+   GpiDeleteBitmap(hbm);
+   GpiDeleteBitmap(bmap);
+
+   GpiAssociate(hpsMem, (HDC)0L);
+   GpiDestroyPS(hpsMem);
+   DevCloseDC(hdcMem);
+
+
+   GpiAssociate(hpsMemTemp,(HDC)0L);
+   GpiDestroyPS(hpsMemTemp);
+   DevCloseDC(hdcMemTemp);
+
+   if(!sScans)
+   {
+   
+      free(pbScan);
+      free(new_pbmi);
+      return FALSE;
+   }
+
+   pPicture->setBitmapInfoheader( new_pbmi );
+   pPicture->setImageData( pbScan );
+   return TRUE;
+}  /*  end of GetBitmap  */
+/*-------------------------picturelist::picturelist--------------------------*/
+/*                                                                           */
+/* Functions    : hlinklist::hlinklist.                                      */
+/*                                                                           */
+/* Description  : Constructor.                                               */
+/*---------------------------------------------------------------------------*/
+picturelist::picturelist(void)
+{
+   plistBase   = NULL;
+   plistEnd    = NULL;
+   m_bSortSize = FALSE; /* ascending/descending */
+   m_bSortName = TRUE;  /* ascending/descending */
+   m_pinPoint  = NULL;  /* m_pinPoint tells whether we are in multiselection mode*/
+   m_iDirection= SEL_NONE;
+}
+/*-------------------------picturelist::~picturelist-------------------------*/
+/*                                                                           */
+/* Functions    : picturelist::~picturelist                                  */
+/*                                                                           */
+/* Description  : Destructor.                                                */
+/*---------------------------------------------------------------------------*/
+picturelist::~picturelist()
+{
+   hPicture *tmp, *p = plistBase;
+   while (p)
+   {
+      tmp = p;
+      p = p->next;
+      delete tmp;
+   }
+}
+/*-------------------------picturelist::addPicture---------------------------*/
+/*                                                                           */
+/* Functions    : picturelist::addPicture                                    */
+/*                                                                           */
+/* Description  : Inserts a record in the picture list.                      */
+/*---------------------------------------------------------------------------*/
+void picturelist::addPicture(hPicture *pPict)
+{
+  hPicture *pTmp;
+
+   if (!plistBase)
+   {
+      plistBase = pPict;
+      plistEnd  = pPict;
+      plistEnd->next     = NULL;
+      plistEnd->previous = NULL;
+   }
+   else
+   {
+      plistEnd->next = pPict;
+      pTmp = plistEnd;
+      plistEnd = plistEnd->next;
+      plistEnd->previous = pTmp;
+      plistEnd->next     = NULL;
+   }
+   return;
+}
+/*-------------------------picturelist::remPicture---------------------------*/
+/*                                                                           */
+/* Functions    : picturelist::remPicture                                    */
+/*                                                                           */
+/* Description  : Removes a record from the picture list.                    */
+/*---------------------------------------------------------------------------*/
+void picturelist::remPicture(hPicture *pPict)
+{
+   hPicture * TmpPrev, * TmpNext;
+
+   if (!pPict)
+      return;
+
+   TmpNext = pPict->next;
+   TmpPrev = pPict->previous;
+
+   if (TmpPrev && TmpNext)
+   {
+      TmpPrev->next     = TmpNext;
+      TmpNext->previous = TmpPrev;
+   }
+   else if (TmpPrev && !TmpNext)
+   {
+      /*
+      ** End of chain so bring back the endof chain pointer.
+      */
+      plistEnd = plistEnd->previous;
+      TmpPrev->next = NULL;
+   }
+   else if (!TmpPrev && TmpNext)
+   {
+      TmpNext->previous = NULL;
+      plistBase = TmpNext;
+   }
+   else if (!TmpPrev && !TmpNext)
+   {
+      plistBase = NULL;
+   }
+   delete pPict;
+   return;
+}
+/*---------------------------------------------------------------------------*/
+BOOL picturelist::deletePicture( char *pszShortName )
+{
+    hPicture * pPict = findPicture(pszShortName);
+
+    if (!pPict)
+        return FALSE;
+
+    remPicture(pPict);
+    return TRUE;
+}
+/*---------------------------------------------------------------------------*/
+void picturelist::delSelectedFromDisk(HWND hwnd)
+{
+    APIRET    rc;  /* Return code */    
+    hPicture * pPict = getFirstPicture();
+    char szErr[250];
+    if (!pPict)
+        return;
+
+    while ( pPict )
+    {
+        
+        if (pPict->m_bSelected)
+        {
+           rc =  DosDelete((PSZ)pPict->getFileName());
+           if ( rc )
+           {
+               WinLoadString((HAB)0, (HMODULE)0,IDS_CANNOTDELETE,
+                              100, (PSZ)szErr);
+               strcat(szErr,"\n");
+               strcat(szErr,pPict->getFileName());
+               WinMessageBox(HWND_DESKTOP,hwnd,
+                             (PSZ)szErr,(PSZ)"ERROR", 0,
+                             MB_OK | MB_APPLMODAL | MB_MOVEABLE | 
+                             MB_ICONASTERISK);
+               return;
+           }
+        }
+        pPict = pPict->next;
+    }
+
+    pPict = getFirstPicture();
+
+    while (pPict)
+    {
+        if (pPict->m_bSelected)
+        {
+            remPicture(pPict);
+            pPict = getFirstPicture();
+        }
+        else
+            pPict = pPict->next;
+    }
+    return;
+}
+/*---------------------------------------------------------------------------*/
+void  picturelist::deleteNonLoaded( void )
+{
+    hPicture *pPict = getFirstPicture();
+
+    while (pPict)
+    {
+        if ( pPict->getImageData() == NULL )
+        {
+            remPicture(pPict);
+            pPict = getFirstPicture();
+        }
+        else
+            pPict = pPict->next;
+    }
+    return;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::getFirstPicture( void )
+{
+   pCursor = plistBase;
+   return pCursor;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::getNextPicture( hPicture *pPict )
+{
+   if (pPict && pPict->next)
+      return pPict->next;
+   return NULL;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::getPrevPicture( hPicture *pPict )
+{
+   if (pPict && pPict->previous)
+      return pPict->previous;
+   return NULL;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::pictureAtPoint(POINTL *pptlMouse)
+{
+   hPicture *pC     = plistBase;
+
+   if (!pC)
+       return NULL;
+
+    while (pC)
+    {
+        if ( pC->pointInPicture(pptlMouse) )
+           return pC;
+        pC = pC->next;
+    }
+    return (hPicture *)0;
+}
+/*---------------------------------------------------------------------------*/
+int picturelist::countSelected( void )                   // used for init drag
+{
+    hPicture *pB;
+    int i = 0;
+
+    if (!plistBase)
+        return 0;
+
+    pB = plistBase;
+
+    while (pB)
+    {
+        if (pB->isSelected())
+            i++;
+        pB = pB->next;
+    }
+    return i;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::getNextSelected(hPicture * hPict) // with null gives first
+{
+    hPicture *pB = plistBase;
+    int i = 0;
+
+    if (!plistBase)
+        return NULL;
+
+    if (hPict)
+        pB = hPict->next;
+
+    if (!pB)
+        return NULL;
+
+    while (pB)
+    {
+        if (pB->isSelected())
+            return pB;
+        pB = pB->next;
+    }
+    return NULL;
+}
+/*---------------------------------------------------------------------------*/
+void picturelist::rotateSelected(HWND hwnd, int degrees)   // RotateSelected imgages
+{
+    hPicture *pPicture = plistBase;
+    hPicture *pT;
+    int iCount = 0;
+    IMAGE Img;    
+    char *pType;
+    RECTL rclInv;
+    RECTL rcl;
+    BOOL bHandled = FALSE;
+
+    if (!plistBase)
+        return;
+
+  if (degrees != 90 && degrees != 270)  
+      return;
+
+    pT = pPicture;
+    cancelLoad( FALSE );
+
+    while (pT)
+    {
+        if (pT && pT->isSelected())
+            iCount++;
+        pT = getNextPicture(pT);
+    }
+
+    if ( pPicture )
+        WinPostMsg(hwnd,UM_SHOWPROGRESS,(MPARAM)0,(MPARAM)0);
+
+   memset((void*)&rclInv,0,sizeof(RECTL));
+   rclInv.xLeft = 10000; //make big to get the smallest
+   rclInv.yBottom=10000;
+
+    while (pPicture && !bCancelLoad)
+    {
+        if (pPicture->isSelected())
+        {
+            pType = pPicture->getFileName();
+            WinPostMsg(hwnd,UM_SHOWFILENAME,(MPARAM)strdup(pPicture->getFileName()),(MPARAM)iCount);
+            
+            pType = strchr(pType,'.');
+
+            if (pType)
+                pType++;
+
+            if (pType && stricmp(pType,"jpg") == 0 )
+            {
+
+                memset(&Img,0,sizeof(IMAGE));
+                Img.pbmp2   = pPicture->getBitmapInfoheader();
+                Img.ImgData = (unsigned char *)pPicture->getImageData();
+                imgRotate(&Img,degrees);
+                pPicture->setBitmapInfoheader( Img.pbmp2 );
+                pPicture->setImageData((PBYTE)Img.ImgData );
+
+                if ( readImageFromDisk(hwnd,pPicture->getFileName(),&Img) )
+                {
+                    imgRotate(&Img,degrees);
+
+                    if (!writejpeg(hwnd,pPicture->getFileName(),&Img))
+                        bCancelLoad = TRUE;
+                    free(Img.ImgData );
+                    free(Img.pbmp2 );
+                }
+            }
+            else if (pType)
+            {
+                /*
+                ** rotate on screen
+                */
+                memset(&Img,0,sizeof(IMAGE));
+                Img.pbmp2   = pPicture->getBitmapInfoheader();
+                Img.ImgData = (unsigned char *)pPicture->getImageData();
+                imgRotate(&Img,degrees);
+                pPicture->setBitmapInfoheader( Img.pbmp2 );
+                pPicture->setImageData((PBYTE)Img.ImgData );
+                /*
+                ** Load detail, rotate..save on disk and remove data from mem..
+                */
+                if ( readImageFromDisk(hwnd,pPicture->getFileName(),&Img) )
+                {
+                    imgRotate(&Img,degrees);
+                    writePicture(hwnd,pPicture->getFileName(),&Img);
+                    free(Img.ImgData );
+                    free(Img.pbmp2 );
+                }
+    
+            }
+            pPicture->getImageRect(&rcl);
+            rclInv.xRight = max(rclInv.xRight,rcl.xRight);    
+            rclInv.xLeft  = min(rclInv.xLeft ,rcl.xLeft );
+            rclInv.yTop   = max(rclInv.yTop  ,rcl.yTop  );    
+            rclInv.yBottom= min(rclInv.yBottom,rcl.yBottom);            
+            bHandled = TRUE;
+        }
+        pPicture = pPicture->next;
+    }
+
+    WinPostMsg(hwnd,UM_CLOSEPROGRESS,(MPARAM)0,(MPARAM)0);
+
+   if (bHandled && hwnd)
+       WinInvalidateRect(hwnd,(RECTL *)0,TRUE);
+}
+/*-----------------------------------------------[ private ]-----------------*/
+BOOL picturelist::sortOnSize(int iCount, hPicture **pArray )
+{
+    int i;
+    hPicture *pB;
+    BOOL bChange = FALSE;
+    BOOL bDone   = FALSE;
+    do
+    {
+        bChange = FALSE;
+        for (i=0; i < iCount-1; i++)
+        {
+            if (m_bSortSize && pArray[i]->m_imgDataSize > pArray[i+1]->m_imgDataSize)
+            {
+                bChange = TRUE;
+                bDone = TRUE;
+                pB = pArray[i];
+                pArray[i]   = pArray[i+1];
+                pArray[i+1] = pB;
+            }
+            else if (!m_bSortSize && pArray[i]->m_imgDataSize < pArray[i+1]->m_imgDataSize)
+            {
+                bChange = TRUE;
+                bDone = TRUE;
+                pB = pArray[i];
+                pArray[i]   = pArray[i+1];
+                pArray[i+1] = pB;
+            }
+
+        }
+    } while ( bChange); 
+    m_bSortSize = !m_bSortSize;
+    return bDone;
+}
+/*-----------------------------------------------[ private ]-----------------*/
+BOOL picturelist::sortOnName(int iCount, hPicture **pArray )
+{
+    int i;
+    hPicture *pB;
+    BOOL bChange = FALSE;
+    BOOL bDone = FALSE;
+
+    do
+    {
+        bChange = FALSE;
+        for (i=0; i < iCount-1; i++)
+        {
+            if (m_bSortName && stricmp(pArray[i]->getShortName(),pArray[i+1]->getShortName()) < 0)
+            {
+                bChange = TRUE;
+                bDone = TRUE;
+                pB = pArray[i];
+                pArray[i]   = pArray[i+1];
+                pArray[i+1] = pB;
+            }
+            else if (!m_bSortName && stricmp(pArray[i]->getShortName(),pArray[i+1]->getShortName()) > 0)
+            {
+                bChange = TRUE;
+                bDone = TRUE;
+                pB = pArray[i];
+                pArray[i]   = pArray[i+1];
+                pArray[i+1] = pB;
+            }
+
+        }
+    } while ( bChange); 
+    m_bSortName = !m_bSortName;
+
+    return bDone;
+}
+/*---------------------------------------------------------------------------*/
+BOOL picturelist::sortPicture(int iSort)
+{
+    BOOL bSorted = FALSE;
+    int iCount,i;
+    hPicture **pArray;
+    hPicture *pB;
+    hPicture *pCursor = plistBase;
+    BOOL bChange = FALSE;
+
+    if ( !plistBase )
+        return FALSE;
+
+    iCount = 0;
+
+    while (pCursor)
+    {
+        iCount++;
+        pCursor = pCursor->next;
+    }
+
+    if (iCount == 1)
+        return FALSE;
+
+    pArray = ( hPicture **)calloc(iCount,sizeof(void *));
+
+    pCursor = plistBase;
+    
+    for ( i = 0; i < iCount; i++)
+    {
+        pArray[i] = pCursor;
+        pCursor = pCursor->next;
+    }
+
+    switch( iSort )
+    {
+    case SORT_SIZE:
+        bSorted = sortOnSize(iCount,pArray );
+        break;
+    case SORT_NAME:
+        bSorted = sortOnName(iCount,pArray );
+        break;
+
+    }
+
+    if (!bSorted)
+    {
+        free(pArray);
+        return FALSE;
+    }
+    /*
+    ** Remake the chain...
+    */
+    for (i = 0; i < iCount-1; i++)
+    {
+        if (i)
+            pArray[i]->previous = pArray[i-1];
+        pArray[i]->next     = pArray[i+1];
+    }
+    pArray[iCount-1]->next = NULL;
+    pArray[0]->previous    = NULL;
+    pArray[1]->previous    = pArray[0]; /*??*/
+
+    plistBase = pArray[0];
+
+    free(pArray);
+    return TRUE;
+}
+/*---------------------------------------------------------------------------*/
+int picturelist::calcRowCount(int slideSize, int cxSheet)
+{
+    RECTL rclImg;
+    hPicture *pC = plistBase;
+
+    rclImg.xLeft  = PIC_SPATIE;
+    rclImg.xRight = rclImg.xLeft + slideSize;
+
+    m_Rows = 1;
+
+    while (pC)
+    {
+        if (rclImg.xRight + slideSize + PIC_SPATIE > cxSheet)
+        {
+            rclImg.xLeft  = PIC_SPATIE;
+            rclImg.xRight = rclImg.xLeft + slideSize;
+            m_Rows++;
+        }
+        else
+        {
+            rclImg.xLeft  += PIC_SPATIE + slideSize;
+            rclImg.xRight += PIC_SPATIE + slideSize;
+        }
+
+        pC = pC->next;
+    }
+    return m_Rows;
+}
+/*---------------------------------------------------------------------------*/
+void picturelist::reCalcPictureRect(HWND hControl,int slideSize, int cxSheet, int cySheet)
+{
+    RECTL rclImg;
+    hPicture *pC = plistBase;
+    int i = 0;
+    long yTop;
+
+    rclImg.xLeft  = PIC_SPATIE;
+    rclImg.xRight = rclImg.xLeft + slideSize;
+    rclImg.yTop   = cySheet - PIC_SPATIE;
+    rclImg.yBottom= rclImg.yTop - slideSize;
+
+    m_Rows     = 0;
+    m_iColumns = 0;
+
+    while (pC)
+    {
+        pC->setImageRect(rclImg);
+
+        if (rclImg.xRight + slideSize + PIC_SPATIE > cxSheet)
+        {
+            rclImg.xLeft  = PIC_SPATIE;
+            rclImg.xRight = rclImg.xLeft + slideSize;
+            rclImg.yTop  -= PIC_SPATIE + slideSize;
+            rclImg.yBottom= rclImg.yTop - slideSize;
+            m_Rows++;
+        }
+        else
+        {
+            rclImg.xLeft  += PIC_SPATIE + slideSize;
+            rclImg.xRight += PIC_SPATIE + slideSize;
+        }
+
+        pC = pC->next;
+    }
+
+    /*
+    ** Calc nr of columns 
+    */
+    pC   = plistBase;
+    yTop = cySheet - PIC_SPATIE;
+    i    = 0;
+    while ( pC )
+    {
+        pC->getImageRect(&rclImg);
+        if (rclImg.yTop != yTop)
+            break;          /* next row so quit loop */
+        pC = pC->next;
+        i++;
+    }
+    m_iColumns = i;
+    if (hControl)
+       WinInvalidateRect(hControl,NULL,TRUE);
+}
+/*---------------------------------------------------------------------------*/
+BOOL picturelist::hasNextRow(hPicture *pPict)
+{
+    int i;
+
+    for ( i = 0; i < m_iColumns && pPict; i++)
+    {
+        pPict = pPict->next;
+    }
+    return (BOOL)(i == m_iColumns && pPict);
+}
+/*---------------------------------------------------------------------------*/
+BOOL picturelist::hasPrevRow(hPicture *pPict)
+{
+    int i;
+
+    for ( i = 0; i < m_iColumns && pPict; i++)
+    {
+        pPict = pPict->previous;
+    }
+    return (BOOL)(i == m_iColumns && pPict);
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::findPicture(char *pszName)
+{
+    hPicture *pC = plistBase;
+
+    if (!pC)
+       return NULL;
+
+    while (pC)
+    {
+        if (!stricmp(pC->getShortName(),pszName))
+            return pC;
+        pC = pC->next;
+    }
+    return NULL;
+}
+
+/*-----------------------------------------------[ public ]------------------*/
+void picturelist::formatFolderString(HWND hwnd)
+{
+    hPicture *pC = plistBase;
+    char szFolder[CCHMAXPATH];
+    char szFormat[CCHMAXPATH];
+    long ulDataSize = 0;
+    long ulItems    = 0;
+
+    szFolder[0] = 0;
+
+
+    while (pC)
+    {
+        ulItems++;
+        ulDataSize += pC->m_imgDataSize;
+        pC = pC->next;
+    }
+
+    WinLoadString((HAB)0,(HMODULE)0,IDS_FOLDERSTRING,CCHMAXPATH, (PSZ)szFormat);
+    if (!szFormat[0])
+        sprintf(szFolder,"Folder contains %ld images. Total datasize %ld",ulItems,ulDataSize);
+    else
+        sprintf(szFolder,szFormat,ulItems,ulDataSize);
+//    printf("%s\n",szFolder);
+    WinPostMsg(hwnd,UM_FOLDERSTRING,(MPARAM)strdup(szFolder),0);
+    return;
+
+}
+/*---------------------------------------------------------------------------*/
+static BOOL readImageFromDisk(HWND hwnd, char *pszFileName,IMAGE * dfImg)
+{
+    char *pType;
+
+    pType = strchr(pszFileName,'.');
+
+    if (pType)
+        pType++;
+    else
+        return FALSE;
+
+    if (pType && stricmp(pType,"jpg") == 0 )
+    {
+        return readjpeg(hwnd,pszFileName,(IMAGE *)dfImg);
+    }
+    else if (pType)
+    {
+        return readPicture(hwnd,pszFileName,(IMAGE *)dfImg);
+    }
+    return FALSE;
+}
+/*---------------------------------------------------------------------------*/
+BOOL picturelist::loadImages(hPicture *pPict, HAB hab, HWND hwnd)
+{
+    hPicture *pPicture;
+    hPicture *pC,*pT;
+    IMAGE     dfImg;
+    int       iCount = 0;
+    if (!pPict)
+    {
+        pPicture =  getFirstPicture();
+    }
+    else
+    {
+        pPicture = pPict;
+    }
+    cancelLoad( FALSE );
+    if ( pPicture )
+        WinPostMsg(hwnd,UM_SHOWPROGRESS,(MPARAM)0,(MPARAM)0);
+
+    pT = pPicture;
+    formatFolderString(hwnd);
+    while (pT)
+    {
+        if (pT && !pT->getBitmapInfoheader())
+            iCount++;
+        pT = getNextPicture(pT);
+    }
+
+    do
+    {
+        if (pPicture && !pPicture->getBitmapInfoheader())
+        {
+           memset(&dfImg,0,sizeof(IMAGE));
+           /*
+           ** jpeg lib exits thread on error so keep
+           ** our state in case of error
+           */
+           pErrorState = pPicture;
+           WinPostMsg(hwnd,UM_SHOWFILENAME,(MPARAM)strdup(pPicture->getFileName()),(MPARAM)iCount);
+           if ( readImageFromDisk(hwnd,(char *)pPicture->getFileName(),&dfImg) )
+           {
+               //printf("Image loaded %s \n",pPicture->getFileName());
+               pErrorState = NULL;
+               if (reduceBitmapSize(pPicture, hab,dfImg.pbmp2,dfImg.ImgData))
+               {
+
+                 free(dfImg.pbmp2 );
+                 free(dfImg.ImgData);
+               }
+               else
+               {
+                  pPicture->setBitmapInfoheader( dfImg.pbmp2 );
+                  pPicture->setImageData((PBYTE)dfImg.ImgData );
+                  pPicture->setImageInfo(dfImg.pbmp2);
+               }
+               WinPostMsg(hwnd,UM_NEWITEM,(MPARAM)0,(MPARAM)pPicture);
+           }
+           pErrorState = NULL;
+        }
+    } while ((pPicture = getNextPicture(pPicture)) != NULL && !bCancelLoad);
+    pErrorState = NULL;
+
+    if (bCancelLoad)
+    {
+        pPicture =  getFirstPicture();
+        while ( pPicture )
+        {
+            pC = pPicture->next;
+            if ( pPicture->getImageData() == NULL )
+            {
+                WinPostMsg(hwnd,UM_SHOWFILENAME,(MPARAM)strdup(pPicture->getFileName()),(MPARAM)0);
+                remPicture(pPicture);
+            }
+            pPicture = pC;
+        }
+    }
+    WinPostMsg(hwnd,UM_CLOSEPROGRESS,(MPARAM)0,(MPARAM)0);
+    formatFolderString(hwnd);
+    return TRUE;
+}
+/*---------------------------------------------------------------------------*/
+void picturelist::selectAllPicture(HWND hwnd, BOOL bSelect, BOOL bRefresh)
+{
+   RECTL rclInv;
+   RECTL rcl;
+   hPicture *pC = plistBase;
+   BOOL bHandled = FALSE;
+
+   if (!pC)
+       return;
+
+   memset((void*)&rclInv,0,sizeof(RECTL));
+   rclInv.xLeft = 10000; //make big to get the smallest
+   rclInv.yBottom=10000;
+
+   if (bSelect)
+   {
+        m_pinPoint   = plistBase;
+        m_iDirection = SEL_FORWARD;
+   }
+
+   while (pC)
+   {
+      if (pC->isSelected() != bSelect)
+      {
+          pC->getImageRect(&rcl);
+          rclInv.xRight = max(rclInv.xRight,rcl.xRight);    
+          rclInv.xLeft  = min(rclInv.xLeft ,rcl.xLeft );
+          rclInv.yTop   = max(rclInv.yTop  ,rcl.yTop  );    
+          rclInv.yBottom= min(rclInv.yBottom,rcl.yBottom);
+          bHandled      = TRUE;
+          pC->selectPicture(hwnd,FALSE,bSelect);
+      }
+      pC = pC->next;
+   }
+   if (bHandled && bRefresh)
+       WinInvalidateRect(hwnd,&rclInv,TRUE);
+}
+/*-----------------------------------------------[ private ]-----------------*/
+void picturelist::selectFromPinTo(HWND hwnd, hPicture *pC)
+{
+    RECTL     rcl;
+    hPicture *pBegin     = m_pinPoint;
+    int      iSel        = SEL_NONE;
+
+    if (!m_pinPoint)
+        return;
+
+     while ( pBegin )
+     {
+         if (pBegin == pC)
+         {
+             iSel = SEL_FORWARD;
+             break;
+         }
+         pBegin = pBegin->next;
+     }
+
+     if (iSel == SEL_NONE)
+     {
+         pBegin     = m_pinPoint;
+
+         while ( pBegin )
+         {
+             if (pBegin == pC)
+             {
+                 iSel = SEL_BACKWARD;
+                 break;
+             }
+             pBegin = pBegin->previous;
+         }
+
+     }
+
+    if ( m_iDirection == SEL_BACKWARD && iSel == SEL_FORWARD )
+    {
+        /*
+        ** unsel - selection range in front of pinpoint.
+        ** selection has changed to a range after the pinpoint.
+        */
+        pBegin     = m_pinPoint;
+
+        while ( pBegin)
+        {
+            if (pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,FALSE);
+            }
+            pBegin = pBegin->previous;
+        }
+        /* make selection...*/
+        
+        m_iDirection = iSel;
+        pBegin       = m_pinPoint;
+        while ( pBegin && pBegin != pC)
+        {
+            if (!pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,TRUE);
+            }
+            pBegin = pBegin->next;
+        }
+        /* cleanup rest of chain...*/
+        while ( pBegin )
+        {
+            if (pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,FALSE);
+            }
+            pBegin = pBegin->next;
+        }
+    }
+    else if ( m_iDirection == SEL_FORWARD && iSel == SEL_BACKWARD )
+    {
+        pBegin     = m_pinPoint;
+        while ( pBegin )
+        {
+            if (pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,FALSE);
+            }
+            pBegin = pBegin->next;
+        }
+
+        /* make selection...*/
+        
+        m_iDirection = iSel;
+        pBegin       = m_pinPoint;
+        while ( pBegin && pBegin != pC)
+        {
+            if (!pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,TRUE);
+            }
+            pBegin = pBegin->previous;
+        }
+        /* cleanup rest of chain...*/
+        while ( pBegin )
+        {
+            if (pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,FALSE);
+            }
+            pBegin = pBegin->previous;
+        }
+
+    }
+    else if ( m_iDirection == SEL_FORWARD && iSel == SEL_FORWARD )
+    {
+        m_iDirection = iSel;
+        pBegin       = m_pinPoint;
+        while ( pBegin && pBegin != pC)
+        {
+            if (!pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,TRUE);
+            }
+            pBegin = pBegin->next;
+        }
+        /* cleanup rest of chain...*/
+        while ( pBegin )
+        {
+            if (pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,FALSE);
+            }
+            pBegin = pBegin->next;
+        }
+
+    }
+    else if ( m_iDirection == SEL_BACKWARD && iSel == SEL_BACKWARD )
+    {
+        m_iDirection = iSel;
+        pBegin       = m_pinPoint;
+        while ( pBegin && pBegin != pC)
+        {
+            if (!pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,TRUE);
+            }
+            pBegin = pBegin->previous;
+        }
+        /* cleanup rest of chain...*/
+        while ( pBegin )
+        {
+            if (pBegin->m_bSelected)
+            {
+                pBegin->selectPicture(hwnd,TRUE,FALSE);
+            }
+            pBegin = pBegin->previous;
+        }
+    }
+    /*
+    ** maybe there was no range selected... so check
+    */
+    else if (m_iDirection == SEL_NONE)
+    {
+        m_iDirection = iSel;
+        pBegin       = m_pinPoint;
+        if (iSel == SEL_BACKWARD)
+        {
+            while ( pBegin && pBegin != pC)
+            {
+                if (!pBegin->m_bSelected)
+                {
+                    pBegin->selectPicture(hwnd,TRUE,TRUE);
+                }
+                pBegin = pBegin->previous;
+            }
+
+            /* cleanup rest of chain...*/
+            while ( pBegin )
+            {
+                if (pBegin->m_bSelected)
+                {
+                    pBegin->selectPicture(hwnd,TRUE,FALSE);
+                }
+                pBegin = pBegin->previous;
+            }
+
+        }
+        else if (iSel == SEL_FORWARD)
+        {
+            while ( pBegin && pBegin != pC)
+            {
+                if (!pBegin->m_bSelected)
+                {
+                    pBegin->selectPicture(hwnd,TRUE,TRUE);
+                }
+                pBegin = pBegin->next;
+            }
+            /* cleanup rest of chain...*/
+            while ( pBegin )
+            {
+                if (pBegin->m_bSelected)
+                {
+                    pBegin->selectPicture(hwnd,TRUE,FALSE);
+                }
+                pBegin = pBegin->next;
+            }
+
+        }
+    }
+
+    if (pC && !pC->m_bSelected)
+    {
+        pC->selectPicture(hwnd,TRUE,TRUE);
+    }
+    return;
+}
+/*------------------------on control key down--------------------------------*/
+hPicture * picturelist::selectSinglePicture(HWND hwnd,hPicture *pCursor, POINTL *pptlMouse)
+{
+   hPicture *pC = NULL;
+
+   if (!plistBase)
+       return NULL;
+
+   if ((pC  = pictureAtPoint(pptlMouse)) == NULL)
+       return pCursor;                  /* no action if user clicks outside */
+
+   if (pC->m_bSelected)
+   {
+       pC->selectPicture(hwnd,TRUE,FALSE);
+   }
+   else
+   {
+       pC->selectPicture(hwnd,TRUE,TRUE);
+   }
+   return (hPicture *)pC;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::selectPicture(HWND hwnd,hPicture *pCursor, POINTL *pptlMouse, BOOL bShift)
+{
+   RECTL rcl;
+   hPicture *pC     = NULL;
+
+   if (!plistBase)
+       return NULL;
+
+   if ((pC  = pictureAtPoint(pptlMouse)) == NULL)
+       return pCursor;                  /* no action if user clicks outside */
+
+   if (!bShift)
+        selectAllPicture(hwnd, FALSE,TRUE); /* unselect the others...*/
+
+
+   if (!bShift || !pCursor)
+   {
+       pC->selectPicture(hwnd,TRUE,TRUE);
+       m_pinPoint = NULL;
+       m_iDirection = SEL_NONE;
+       return pC;
+   }
+
+   if (pC == pCursor)   /* shift click on the last selected....?*/
+       return pC;
+
+   if (bShift && !m_pinPoint)
+   {
+       m_pinPoint = pCursor;
+       m_iDirection = SEL_NONE;
+   }
+
+   selectFromPinTo(hwnd,pC);
+
+   return (hPicture *)pC;
+}
+/*---------------------------------------------------------------------------*/
+/* VK_END */
+hPicture * picturelist::selectLastPicture(hPicture *pPict, HWND hwnd, BOOL bShift)
+{
+    hPicture *p = pPict;
+
+    if (bShift)
+    {
+        while ( p )
+        {
+           selectNextPicture(p,hwnd,bShift);
+           p = p->next;
+        }
+
+        p = pPict;
+        while ( p->next )
+           p = p->next;
+
+    }
+    else
+    {
+        while ( p->next )
+           p = p->next;
+
+        pPict->selectPicture( hwnd,TRUE,FALSE);
+        p->selectPicture(hwnd,TRUE,TRUE);
+        m_pinPoint = NULL;
+        m_iDirection = SEL_NONE;
+    }
+    return p;
+}
+/*---------------------------------------------------------------------------*/
+/* VK_HOME */
+hPicture * picturelist::selectFirstPicture(hPicture *pPict, HWND hwnd, BOOL bShift)
+{
+    hPicture *p = pPict;
+
+    if (bShift)
+    {
+        while ( p )
+        {
+           selectPrevPicture(p,hwnd,bShift);
+           p = p->previous;
+        }
+
+        p = pPict;
+        while ( p->previous )
+           p = p->previous;
+
+    }
+    else
+    {
+        while ( p->previous )
+           p = p->previous;
+        pPict->selectPicture( hwnd,TRUE,FALSE);
+        p->selectPicture(hwnd,TRUE,TRUE);
+        m_pinPoint = NULL;
+        m_iDirection = SEL_NONE;
+    }
+    return p;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::selectPrevPicture(hPicture *pPict, HWND hwnd, BOOL bShift)
+{
+    RECTL rcl;
+    hPicture *pPrev;
+
+    if (!pPict)
+        return NULL;
+    /*
+    ** m_pinPoint tells whether we are in multiselection mode
+    */
+    if (!bShift && m_pinPoint)
+    {
+        selectAllPicture(hwnd, FALSE,TRUE); /* unselect the others...*/
+        m_pinPoint = NULL;
+        m_iDirection = SEL_NONE;
+    }
+
+    if (bShift && !m_pinPoint)
+    {
+        m_pinPoint = pPict;
+        m_iDirection = SEL_BACKWARD;
+    }
+    else if (m_pinPoint == pPict && m_iDirection == SEL_FORWARD)
+    {
+        m_iDirection = SEL_BACKWARD;
+    }
+
+    if ( (pPrev = getPrevPicture(pPict)) == NULL)
+    {
+        if (!pPict->m_bSelected)
+        {
+            pPict->selectPicture(hwnd,TRUE,TRUE);
+        }
+        return pPict;
+    }
+
+    if (!bShift || (bShift && m_iDirection == SEL_FORWARD))
+    {
+        pPict->selectPicture(hwnd,TRUE,FALSE);
+    }
+    pPrev->selectPicture(hwnd,TRUE,TRUE);
+    //printf("selectNextPicture\n");
+    return pPrev;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::selectNextPicture(hPicture *pPict, HWND hwnd, BOOL bShift)
+{
+    RECTL rcl;
+    hPicture *pNext;
+
+    if (!pPict)
+        return NULL;
+
+    /*
+    ** m_pinPoint tells whether we are in multiselection mode
+    */
+    if (!bShift && m_pinPoint)
+    {
+        selectAllPicture(hwnd, FALSE, TRUE); /* unselect the others...*/
+        m_pinPoint = NULL;
+        m_iDirection = SEL_NONE;
+    }
+
+    if (bShift && !m_pinPoint)
+    {
+        m_iDirection = SEL_FORWARD;
+        m_pinPoint = pPict;
+    }
+    else if (m_pinPoint == pPict && m_iDirection == SEL_BACKWARD)
+    {
+        m_iDirection = SEL_FORWARD;
+    }
+
+    if ( (pNext = getNextPicture(pPict)) == NULL)
+    {
+        
+        if (!pPict->m_bSelected)
+        {
+            pPict->selectPicture(hwnd,TRUE,TRUE);
+        }
+        return pPict;
+    }
+
+    if (!bShift || (bShift && m_iDirection == SEL_BACKWARD))
+    {
+        pPict->selectPicture(hwnd,TRUE,FALSE);
+    }
+
+    pNext->selectPicture(hwnd,TRUE,TRUE);    
+    //printf("selectNextPicture\n");
+    return pNext;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::selectNextRow(hPicture *pPict, HWND hwnd, BOOL bShift)
+{
+    RECTL rcl;
+    hPicture *pNext;
+    int i;
+
+    if (!pPict)
+        return NULL;
+
+    if (!hasNextRow(pPict))
+        return pPict;
+
+    if (bShift)
+    {
+        for ( int i = 0; i < m_iColumns; i++)
+            pPict = selectNextPicture(pPict,hwnd,bShift);
+        pNext = pPict;
+    }
+    else
+    {
+        pNext = pPict;
+        for ( i = 0; i < m_iColumns && pNext; i++)
+        {
+            pNext = pNext->next;
+        }
+
+        if (m_pinPoint)
+        {
+            selectAllPicture(hwnd, FALSE, TRUE); /* unselect the others...*/
+            m_pinPoint = NULL;
+            m_iDirection = SEL_NONE;
+        }
+        else
+            pPict->selectPicture(hwnd,TRUE,FALSE);
+
+        pNext->selectPicture(hwnd,TRUE,TRUE);
+    }
+
+    return pNext;
+}
+/*---------------------------------------------------------------------------*/
+hPicture * picturelist::selectPrevRow(hPicture *pPict, HWND hwnd, BOOL bShift)
+{
+    RECTL rcl;
+    hPicture *pPrev;
+    int i;
+
+    if (!pPict)
+        return NULL;
+
+    if (!hasPrevRow(pPict))
+        return pPict;
+
+    if (bShift)
+    {
+        for ( int i = 0; i < m_iColumns; i++)
+            pPict = selectPrevPicture(pPict,hwnd,bShift);
+        pPrev = pPict;
+    }
+    else
+    {
+        pPrev = pPict;
+        for ( i = 0; i < m_iColumns && pPrev; i++)
+        {
+            pPrev = pPrev->previous;
+        }
+
+        if (m_pinPoint)
+        {
+            selectAllPicture(hwnd, FALSE, TRUE); /* unselect the others...*/
+            m_pinPoint = NULL;
+            m_iDirection = SEL_NONE;
+        }
+        else
+            pPict->selectPicture(hwnd,TRUE,FALSE);
+
+        pPrev->selectPicture(hwnd,TRUE,TRUE);
+    }
+    return pPrev;
+}
+/*---------------------------------------------------------------------------*/
+hPicture::hPicture( char *pszfile,char *pszShortName, int i )
+{
+   HDC      hdcBitmapFile;
+   memset(m_szFilename,0,255);
+   strcpy(m_szFilename,strupr(pszfile));
+   memset(m_szShortname,0,255);
+   strcpy(m_szShortname,pszShortName);
+
+   m_index = i;
+   m_pbmp2   = NULL;
+   m_imgData = NULL;
+
+   m_detailpbmp2    = NULL;
+   m_detailpImgData = NULL;
+
+   m_bSelected = FALSE;
+   memset((void *)&m_rcl,0,sizeof(RECTL));
+   if (!m_hpsMem)
+        CreateBitmapHdcHps( &hdcBitmapFile,&m_hpsMem);
+
+   m_cxPixels    = 0;
+   m_cyPixels    = 0;
+   m_imgDataSize = 0;  /* sort on size! */
+   next          = NULL;
+   previous      = NULL;
+
+}
+/*---------------------------------------------------------------------------*/
+hPicture::~hPicture( )
+{
+    if ( m_pbmp2 )
+       free(m_pbmp2);
+    m_pbmp2   = NULL;
+
+    if ( m_imgData )
+       free(m_imgData);
+    m_imgData = NULL;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::selectPicture(HWND hwnd,BOOL bRepaint,BOOL bSelect)
+{
+    RECTL rcl;
+    char szImage[150];
+    char szFormat[CCHMAXPATH];
+
+    if ( bSelect == m_bSelected )
+        return;
+
+    m_bSelected = bSelect;
+
+    if (bRepaint)
+    {
+        getImageRect(&rcl);
+        WinInvalidateRect(hwnd,&rcl,TRUE);
+
+        WinLoadString((HAB)0,(HMODULE)0,IDS_DETAILSTRING,CCHMAXPATH, (PSZ)szFormat);
+        if (!szFormat[0])
+            sprintf(szImage,"Name:%s Size:%ld X %ld",getShortName(),m_cxPixels,m_cyPixels);
+        else
+            sprintf(szImage,szFormat,getShortName(),m_cxPixels,m_cyPixels);
+        //printf("%s\n",szImage);
+        WinPostMsg(hwnd,UM_IMAGESTRING,(MPARAM)strdup(szImage),0);
+
+    }
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::setImageInfo(PBITMAPINFOHEADER2 pbmp2)
+{
+   ULONG             lBmpDataSize;
+   USHORT            sScanLineSize;
+
+   if (!pbmp2)
+       return;
+
+   sScanLineSize = ((pbmp2->cBitCount * pbmp2->cx + 31) / 32) * 4 *
+                     pbmp2->cPlanes;
+
+   lBmpDataSize  = (LONG) sScanLineSize * pbmp2->cy ;
+
+   m_cxPixels    = (unsigned int)pbmp2->cx;     /* show in props */
+   m_cyPixels    = (unsigned int)pbmp2->cy;     /* show in props */
+   m_imgDataSize = (unsigned int)lBmpDataSize;  /* sort on size! */
+}
+/*---------------------------------------------------------------------------*/
+PBITMAPINFOHEADER2 hPicture::getBitmapInfoheader( void ) 
+{ 
+   return m_pbmp2; 
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::setImageRect(RECTL rcl)
+{
+    m_rcl = rcl;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::getImageRect(RECTL *prcl)
+{
+    *prcl = m_rcl;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::loadPicRect(RECTL *prclImage)
+{
+    memcpy((void *)prclImage,(void *)&m_rcl,sizeof(RECTL));
+}
+/*---------------------------------------------------------------------------*/
+hPicture * hPicture::pointInPicture(POINTL *pptl)
+{
+    if (WinPtInRect((HAB)0,&m_rcl,pptl))
+         return this;
+    else
+        return NULL;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::setBitmapInfoheader( PBITMAPINFOHEADER2 p ) 
+{ 
+   m_pbmp2 = p; 
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::setImageData( PBYTE pcData )
+{
+   m_imgData = pcData;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::setDetailBitmapInfoheader( PBITMAPINFOHEADER2 p ) 
+{ 
+  m_detailpbmp2    = p;
+}
+/*---------------------------------------------------------------------------*/
+PBITMAPINFOHEADER2  hPicture::getDetailBitmapInfoheader( void ) 
+{ 
+    return m_detailpbmp2;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::setDetailImageData( PBYTE pcData )
+{
+   m_detailpImgData = pcData;
+}
+/*---------------------------------------------------------------------------*/
+PBYTE hPicture::getDetailImageData( void )
+{
+   return m_detailpImgData;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::freeDetailImage(void)
+{
+   if ( m_detailpImgData )
+       free(m_detailpImgData );
+   m_detailpImgData = NULL;
+
+   if (m_detailpbmp2)
+       free(m_detailpbmp2);
+   m_detailpbmp2 = NULL;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::freeImage(void)
+{
+   if ( m_imgData )
+       free(m_imgData );
+   m_imgData = NULL;
+
+   if (m_pbmp2)
+       free(m_pbmp2);
+   m_pbmp2 = NULL;
+}
+/*---------------------------------------------------------------------------*/
+PBYTE hPicture::getImageData( void )
+{
+   return m_imgData;
+}
+/*---------------------------------------------------------------------------*/
+int hPicture::getHeight( void )
+{
+    PBITMAPINFOHEADER2 pbmp2 = getBitmapInfoheader();
+
+    if (!pbmp2)
+        return 0;
+    else
+        return (int)pbmp2->cy;
+}
+/*---------------------------------------------------------------------------*/
+int  hPicture::getWidth ( void )
+{
+    PBITMAPINFOHEADER2 pbmp2 = getBitmapInfoheader();
+
+    if (!pbmp2)
+        return 0;
+    else
+        return (int)pbmp2->cx;
+}
+
+/*---------------------------------------------------------------------------*/
+int  hPicture::getDetailWidth ( void )
+{
+    if (!m_detailpbmp2)
+    {
+        return getWidth();
+    }
+    else
+        return (int)m_detailpbmp2->cx;
+}
+/*---------------------------------------------------------------------------*/
+int  hPicture::getDetailHeight ( void )
+{
+    if (!m_detailpbmp2)
+    {
+        return getHeight();
+    }
+    else
+        return (int)m_detailpbmp2->cy;
+}
+/*---------------------------------------------------------------------------*/
+HBITMAP hPicture::pict2BitmapHandle( void )
+{
+    HBITMAP hbm;
+    PBITMAPINFOHEADER2 pbmp2;
+    PBYTE   ImgData;
+
+    pbmp2   = getBitmapInfoheader();
+    ImgData = getImageData();
+
+    if (!pbmp2 || !ImgData)
+       return (HBITMAP)0;
+
+    hbm = GpiCreateBitmap(m_hpsMem,             /* presentation-space handle */
+                          pbmp2,                /* address of structure for format data */
+                          CBM_INIT,             /* options     */
+                          ImgData,              /* bitmap data */
+                          (PBITMAPINFO2)pbmp2); /* address of structure for color and format */    
+    return hbm;
+}
+/*---------------------------------------------------------------------------*/
+void hPicture::paintDetail(HPS hps, RECTL *prcl)
+{
+    HBITMAP hbm;
+    PBITMAPINFOHEADER2 pbmp2;
+    PBYTE   ImgData;
+    POINTL  aBitmap[4];
+    long    lcx,lcy;
+    float   fAspect;
+    int     xSize,ySize;
+    int     cxOrg,cyOrg,diff;
+    char    *p;
+    char    szTmp[CCHMAXPATH];
+    RECTL   rclOrg;
+    RECTL   rclText,rclDest;
+    FONTMETRICS fm;
+    RECTL   rclImage;
+    BOOL    bLoading = FALSE;
+
+    rclOrg = *prcl;
+
+
+    cxOrg = prcl->xRight - prcl->xLeft;
+    cyOrg = prcl->yTop - prcl->yBottom;
+
+    if (!m_detailpbmp2)
+    {
+        pbmp2   = getBitmapInfoheader();
+        ImgData = getImageData();
+        bLoading = TRUE;
+    }
+    else
+    {
+        pbmp2   = m_detailpbmp2;
+        ImgData = m_detailpImgData;
+    }
+
+    if (!pbmp2 || !ImgData)
+       return;
+
+    hbm = GpiCreateBitmap(m_hpsMem,      /* presentation-space handle */
+                          pbmp2,      /* address of structure for format data */
+                          CBM_INIT,         /* options     */
+                          ImgData,    /* bitmap data */
+                          (PBITMAPINFO2)pbmp2); /* address of structure for color and format */    
+
+
+
+     xSize    = prcl->xRight - prcl->xLeft;
+     ySize    = prcl->yTop   - prcl->yBottom;
+
+
+     if (pbmp2->cx > pbmp2->cy )
+     {
+        /* landscape picture */
+         fAspect =  (float)pbmp2->cy;
+         fAspect /= (float)pbmp2->cx;
+         ySize    = (int)(fAspect * xSize);
+         prcl->yTop = ySize + prcl->yBottom;
+
+         if (cyOrg > ySize)
+         {
+            diff = cyOrg - ySize;
+            prcl->yBottom += diff/2;
+            prcl->yTop    += diff/2;
+         }
+     }
+     else if (pbmp2->cy > pbmp2->cx )
+     {
+         fAspect =  (float)pbmp2->cx;
+         fAspect /= (float)pbmp2->cy;
+         xSize    = (int)(fAspect * ySize);
+         prcl->xRight = xSize + prcl->xLeft;
+         if (cxOrg > xSize)
+         {
+            diff = cxOrg - xSize;
+            prcl->xLeft += diff/2;
+            prcl->xRight+= diff/2;
+         }
+     }
+
+     aBitmap[0].x = (LONG)prcl->xLeft; // Dest Lower LH Corner
+     aBitmap[0].y = (LONG)prcl->yBottom;
+     aBitmap[1].x = prcl->xRight;
+     aBitmap[1].y = prcl->yTop;
+     aBitmap[2].x = 0;                  // Source Lower LH Corner
+     aBitmap[2].y = 0;
+     aBitmap[3].x = pbmp2->cx-1;   // Source Upper RH Corner
+     aBitmap[3].y = pbmp2->cy-1;
+     GpiWCBitBlt(hps,  /* presentation space                      */
+                 hbm,              /* bit-map handle                          */
+                 4L,               /* four points needed to compress          */
+                 aBitmap,          /* points for source and target rectangles */
+                 ROP_SRCCOPY,      /* copy source replacing target            */
+                 BBO_IGNORE);      /* discard extra rows and columns          */
+      GpiDeleteBitmap(hbm);
+
+      if (bLoading)
+      {
+         rclText.xLeft  = rclOrg.xLeft  + 5;
+         rclText.xRight = rclOrg.xRight - 5;
+         rclText.yTop   = rclOrg.yBottom + m_lCharHeight + 5;
+         rclText.yBottom= rclOrg.yBottom + 5;
+
+         sprintf(szTmp,"Loading %s....",getShortName());
+         WinDrawText(hps,-1,(PCH)szTmp,&rclText,CLR_BLUE,CLR_BACKGROUND,
+                     DT_CENTER | DT_VCENTER | DT_ERASERECT );
+      }
+}
+/*---------------------------------------------------------------------------*/
+BOOL hPicture::paint(HPS hps,RECTL *prclInvalidate, BOOL bShowName)
+{
+    HBITMAP hbm;
+    PBITMAPINFOHEADER2 pbmp2;
+    PBYTE   ImgData;
+    POINTL  aBitmap[4];
+    long    lcx,lcy;
+    float   fAspect;
+    int     xSize,ySize;
+    int     cxOrg,cyOrg,diff;
+    char    *p;
+    RECTL   rclOrg;
+    RECTL   rclText,rclDest;
+    FONTMETRICS fm;
+    RECTL   *prcl;
+    RECTL   rclImage;
+    POINTL  ptl;
+
+    loadPicRect(&rclImage);  /* Get copy! of picture rect*/
+
+    prcl = &rclImage;
+
+    //printf("Paint picture %s xLeft=%d yBottom=%d\n",m_szShortname,prcl->xLeft,prcl->yBottom);
+    if (prclInvalidate)
+    {
+        if (!WinIntersectRect((HAB)0,&rclDest,prclInvalidate,&rclImage))
+        {
+            //printf("Paint picture failed!\n");
+            return TRUE;
+        }
+    }
+
+    WinFillRect(hps,prcl,CLR_PALEGRAY);
+
+    if (isSelected())
+	{
+		ptl.x = prcl->xLeft   + 2;
+		ptl.y = prcl->yBottom + 2;
+		GpiMove(hps,&ptl);
+		GpiSetColor(hps,CLR_BLUE);
+		ptl.x = prcl->xRight - 2;
+		ptl.y = prcl->yTop  - 2;
+		GpiBox(hps,DRO_OUTLINE,&ptl,0,0);
+	}
+
+
+
+    WinDrawBorder(hps, prcl,1L,1L,0L, 0L, DB_RAISED);
+
+    rclOrg = *prcl;
+
+    prcl->xLeft   +=SLIDE_BORDER;
+    prcl->xRight  -=SLIDE_BORDER;
+    prcl->yBottom +=SLIDE_BORDER;
+    prcl->yTop    -=SLIDE_BORDER;
+
+    if (bShowName)
+    {
+        if (m_lCharHeight == 0)
+        {
+           GpiQueryFontMetrics(hps,(LONG)sizeof(FONTMETRICS),&fm);
+           m_lCharHeight = fm.lMaxBaselineExt;
+        }        
+    	prcl->yBottom += m_lCharHeight;
+    	
+    }
+
+    cxOrg = prcl->xRight - prcl->xLeft;
+    cyOrg = prcl->yTop - prcl->yBottom;
+
+    pbmp2   = getBitmapInfoheader();
+    ImgData = getImageData();
+
+    if (pbmp2 && ImgData)
+    {
+
+    hbm = GpiCreateBitmap(m_hpsMem,      /* presentation-space handle */
+                          pbmp2,      /* address of structure for format data */
+                          CBM_INIT,         /* options     */
+                          ImgData,    /* bitmap data */
+                          (PBITMAPINFO2)pbmp2); /* address of structure for color and format */    
+
+
+
+     xSize    = prcl->xRight - prcl->xLeft;
+     ySize    = prcl->yTop   - prcl->yBottom;
+
+
+     if (pbmp2->cx > pbmp2->cy )
+     {
+        /* landscape picture */
+         fAspect =  (float)pbmp2->cy;
+         fAspect /= (float)pbmp2->cx;
+         ySize    = (int)(fAspect * xSize);
+         prcl->yTop = ySize + prcl->yBottom;
+
+         if (cyOrg > ySize)
+         {
+            diff = cyOrg - ySize;
+            prcl->yBottom += diff/2;
+            prcl->yTop    += diff/2;
+         }
+     }
+     else if (pbmp2->cy > pbmp2->cx )
+     {
+         fAspect =  (float)pbmp2->cx;
+         fAspect /= (float)pbmp2->cy;
+         xSize    = (int)(fAspect * ySize);
+         prcl->xRight = xSize + prcl->xLeft;
+         if (cxOrg > xSize)
+         {
+            diff = cxOrg - xSize;
+            prcl->xLeft += diff/2;
+            prcl->xRight+= diff/2;
+         }
+     }
+
+     aBitmap[0].x = (LONG)prcl->xLeft; // Dest Lower LH Corner
+     aBitmap[0].y = (LONG)prcl->yBottom;
+     aBitmap[1].x = prcl->xRight;
+     aBitmap[1].y = prcl->yTop;
+     aBitmap[2].x = 0;                  // Source Lower LH Corner
+     aBitmap[2].y = 0;
+     aBitmap[3].x = pbmp2->cx-1;   // Source Upper RH Corner
+     aBitmap[3].y = pbmp2->cy-1;
+     GpiWCBitBlt(hps,  /* presentation space                      */
+                 hbm,              /* bit-map handle                          */
+                 4L,               /* four points needed to compress          */
+                 aBitmap,          /* points for source and target rectangles */
+                 ROP_SRCCOPY,      /* copy source replacing target            */
+                 BBO_IGNORE);      /* discard extra rows and columns          */
+      GpiDeleteBitmap(hbm);
+
+      } /* endof if pbmp2 && ImgData */
+      else
+      {
+         /*
+         ** No image to show yet, so show the man at work
+         */
+        ptl.x = ((prcl->xRight - prcl->xLeft)/2) - 20;
+        ptl.y = ((prcl->yTop - prcl->yBottom)/2) - 20;
+        hbm = GpiLoadBitmap(hps,NULL,IDB_ATWORK,AT_WORKSIZE,AT_WORKSIZE);
+        WinDrawBitmap(hps,hbm,NULL,&ptl,CLR_NEUTRAL,CLR_BACKGROUND,DBM_NORMAL);
+        GpiDeleteBitmap(hbm);
+      }
+
+
+      if (bShowName)
+      {
+         p = getShortName();
+         rclText.xLeft  = rclOrg.xLeft  + 5;
+         rclText.xRight = rclOrg.xRight - 5;
+         rclText.yTop   = rclOrg.yBottom + m_lCharHeight + 5;
+         rclText.yBottom= rclOrg.yBottom + 5;
+         WinDrawText(hps,-1,(PCH)p,&rclText,CLR_BLUE,CLR_BACKGROUND,
+                     DT_CENTER | DT_VCENTER | DT_ERASERECT);
+      }
+      return TRUE;    
+}
+/*---------------------------------------------------------------------------*/
+static BOOL runThroughDir(HWND hwnd, 
+                          HAB hab, 
+                          picturelist *picList, 
+                          char *pszDirectory, 
+                          char *pszPattern,
+                          int cxSheet,
+                          int cySheet,
+                          int picsize)
+{
+    int iDisk;
+    hDir = HDIR_SYSTEM;
+    FindCount = 1;
+    hPicture    *pPicture;
+    char   szFullPattern[255];  /* path + the search pattern */
+    char   szFullName[255];
+    char   szBuf[250];
+    BOOL   bSlash;
+    int    i;
+    APIRET rc;           /* Return code */    
+    RECTL    rclImage,*prcl;
+
+    //printf("RunThroughDir  = %s", pszDirectory);
+
+
+
+    rclImage.xLeft   = PIC_SPATIE;
+    rclImage.xRight  = rclImage.xLeft + picsize;
+    rclImage.yTop    = cySheet - PIC_SPATIE;
+    rclImage.yBottom = rclImage.yTop  - picsize;
+
+    if (pszDirectory[1] == ':')
+    {
+       if (pszDirectory[0] >= 'a' && pszDirectory[0] <= 'z')
+           iDisk = pszDirectory[0] - 96;
+       else if (pszDirectory[0] >= 'A' && pszDirectory[0] <= 'Z')
+           iDisk = pszDirectory[0] - 64;
+
+       rc = DosSelectDisk(iDisk);
+     
+/*       rc = DosChDir(&pszDirectory[2]); */
+
+       if (rc != 0)
+       {
+        //printf("DosChDir error: return code = %ld path = %s \n",rc,&pszDirectory[2]);
+        return FALSE;
+       }
+       /*
+       ** create full pattern path + search pattern 
+       ** for instance f:\myfiles\ + *.jpg
+       */
+       strcpy(szFullPattern,&pszDirectory[2]);
+       if (szFullPattern[strlen(szFullPattern)-1] == '\\')
+       {
+          strcat(szFullPattern,pszPattern);
+       }
+       else
+       {
+          strcat(szFullPattern,"\\");
+          strcat(szFullPattern,pszPattern);
+       }
+    }
+    else /* no disk letter defined maybe it's a network driver.... */
+    {
+       strcpy(szFullPattern,pszDirectory);
+       if (szFullPattern[strlen(szFullPattern)-1] == '\\')
+       {
+          strcat(szFullPattern,pszPattern);
+       }
+       else
+       {
+          strcat(szFullPattern,"\\");
+          strcat(szFullPattern,pszPattern);
+       }
+
+    }
+    //printf("Calling DosFindFirst path=%s\n",szFullPattern);
+
+    rc = DosFindFirst((PSZ)szFullPattern,    /* File pattern */
+                      &hDir,                 /* Directory search handle */
+                      FILE_NORMAL,           /* Search attribute */
+                      (PVOID) &FindBuffer,   /* Result buffer */
+                      sizeof(FindBuffer),    /* Result buffer length */
+                      &FindCount,            /* Number of entries to find */
+                      FIL_STANDARD);        /* Return level 1 file info */
+ 
+      if (rc != 0)
+      {
+        switch(rc)
+        {
+        case ERROR_PATH_NOT_FOUND:
+            //printf("ERROR_PATH_NOT_FOUND: DosFindFirst error: return code = %ld %s\n",rc,szFullPattern);
+            break;
+        case ERROR_NO_MORE_FILES:
+            //printf("ERROR_NO_MORE_FILES: DosFindFirst error: return code = %ld %s\n",rc,szFullPattern);
+            break;
+        default:
+            //printf("DosFindFirst error: return code = %ld\n",rc);
+            break;
+        }
+        DosFindClose(hDir);
+        return FALSE;
+      }
+
+
+
+    if ( pszDirectory[strlen(pszDirectory)-1] == '\\')
+       bSlash = TRUE;
+    else
+       bSlash = FALSE;
+    i = 0;
+    do 
+    {
+
+        if (bSlash)
+           sprintf(szFullName,"%s%s",pszDirectory,FindBuffer.achName);
+        else
+           sprintf(szFullName,"%s\\%s",pszDirectory,FindBuffer.achName);
+
+        if (isSupported((char *)FindBuffer.achName) )
+        {
+            //printf("File:%s SearchCount = %d\n",FindBuffer.achName,FindCount);
+            pPicture = new hPicture(szFullName,FindBuffer.achName,i++);
+            picList->addPicture(pPicture);
+        }
+    	rc = DosFindNext(hDir,                /* Directory handle */
+                     	 (PVOID)&FindBuffer,  /* Result buffer */
+                     	 sizeof(FindBuffer),  /* Result buffer length */
+                         &FindCount);         /* Number of entries to find */
+
+    } while ( !rc );
+
+    DosFindClose(hDir);
+    picList->reCalcPictureRect(hwnd,picsize,cxSheet,cySheet);
+    picList->loadImages(NULL,hab,hwnd);
+    return TRUE;
+}
+/*-----------------------------------------------[ private ]-----------------*/
+void _System picCreateList(LOADERDEF *pcdef )
+{
+   picturelist *pList;
+   pList = new picturelist();
+
+   WinPostMsg(pcdef->hwndClient,UM_NEWLIST,0,(MPARAM)pList);
+   runThroughDir(pcdef->hwndClient,pcdef->hab,pList,pcdef->szPath,"*.*",pcdef->cxSheet,pcdef->cySheet,pcdef->iPicSize);
+}
+/*-----------------------------------------------[ private ]-----------------*/
+void _System loadImageDetail(LOADERDEF *pcdef )
+{
+    IMAGE     dfImg;
+    hPicture *pPict   = pcdef->pPic;
+
+    memset(&dfImg,0,sizeof(IMAGE));
+
+    if (bCancelDetailLoad)
+        return;
+
+
+    if (pPict && readImageFromDisk(pcdef->hwndClient,pPict->getFileName(),&dfImg) )
+    {
+        if (!bCancelDetailLoad)
+        {
+            pPict->setDetailBitmapInfoheader( (PBITMAPINFOHEADER2)dfImg.pbmp2);
+            pPict->setDetailImageData((PBYTE)dfImg.ImgData );
+            if (pcdef->hwndClient)
+                WinPostMsg(pcdef->hwndClient,UM_DETAIL,0,(MPARAM)0);
+        }
+        else
+        {
+            free((void *)dfImg.pbmp2);
+            free((void *)dfImg.ImgData);
+        }
+    }
+}
+/*-----------------------------------------------[ private ]-----------------*/
+void _System continueList( LOADERDEF *pcdef )
+{
+    HWND            hwnd = pcdef->hwndClient;
+    picturelist *picList = pcdef->pList;
+    HAB hab              = pcdef->hab;
+
+    if (!picList)
+       return;
+
+    picList->loadImages(NULL,hab,hwnd);
+}
+/*-----------------------------------------------[ public ]------------------*/
+TID createPictureList( HWND hwndClient , HAB hab, char *pszPath, int cx,int cy, int iSize )
+{
+   APIRET rc;           /* Return code */    
+   loaddef.hwndClient = hwndClient;
+   loaddef.cxSheet    = cx;
+   loaddef.cySheet    = cy;
+   loaddef.iPicSize   = iSize;
+   strcpy(loaddef.szPath,pszPath);
+   pErrorState = NULL;
+   ThreadFlags = 0;                /* Indicate that the thread is to */
+                                   /* be started immediately         */
+   StackSize = PICTHREADSTACK;     /* Set the size for the new       */
+                                   /* thread's stack                 */
+
+   rc = DosCreateThread(&ThreadID,(PFNTHREAD)picCreateList,(ULONG)&loaddef,
+                        ThreadFlags,StackSize);
+
+   if (!rc)
+       return ThreadID;
+
+   return (TID)0;
+}
+/*-----------------------------------------------[ public ]------------------*/
+TID  continueOnError( HWND hwndClient,HAB hab, picturelist *pList )
+{
+   APIRET    rc;  /* Return code */    
+
+   if (pErrorState == NULL || !pList)
+      return FALSE;
+
+   loaddef.hwndClient = hwndClient;
+   loaddef.pList      = pList;
+   loaddef.pPic       = pList->getNextPicture(pErrorState);
+   loaddef.hab        = hab;
+
+   pList->remPicture(pErrorState);
+
+   ThreadFlags = 0;                /* Indicate that the thread is to */
+                                   /* be started immediately         */
+   StackSize = PICTHREADSTACK;     /* Set the size for the new       */
+                                   /* thread's stack                 */
+
+   rc = DosCreateThread(&ThreadID,(PFNTHREAD)continueList,(ULONG)&loaddef,
+                        ThreadFlags,StackSize);
+   if (!rc)
+       return ThreadID;
+
+   return (TID)0;
+}
+
+/*-----------------------------------------------[ public ]------------------*/
+TID  loadDetailForImage( HWND hwndClient,HAB hab, hPicture *pPict )
+{
+   APIRET    rc;  /* Return code */    
+   loaddef.hwndClient = hwndClient;
+   loaddef.pList      = 0;
+   loaddef.pPic       = pPict;
+   loaddef.hab        = hab;
+   bCancelDetailLoad  = FALSE;
+   ThreadFlags = 0;                /* Indicate that the thread is to */
+                                   /* be started immediately         */
+   StackSize = PICTHREADSTACK;     /* Set the size for the new       */
+                                   /* thread's stack                 */
+
+   rc = DosCreateThread(&ThreadID,(PFNTHREAD)loadImageDetail,(ULONG)&loaddef,
+                        ThreadFlags,StackSize);
+   if (!rc)
+       return ThreadID;
+
+   return (TID)0;
+}
+/*-----------------------------------------------[ public ]------------------*/
+void _System rotateSelectedThread (dropcopyblock *pBlock)
+{
+   picturelist *picList;
+
+   picList = pBlock->loader.pList;
+
+   picList->rotateSelected(pBlock->loader.hwndClient,pBlock->iRot);
+
+   free(pBlock);
+}
+/*-----------------------------------------------[ public ]------------------*/
+void _System dropCopyThread (dropcopyblock *pBlock)
+{
+   PDRAGITEM pditem;
+   USHORT    i;
+   ULONG     flResult;
+   HAB       hab;
+   HMQ       hmq;
+   PDRAGINFO pdinfo;
+   ULONG ulBytesWritten;
+   char      szFileName[80];
+   char      szSource[CCHMAXPATH];
+   char      szContain[CCHMAXPATH];
+   char      szTarget[CCHMAXPATH];
+   char      *pszFolder;
+   APIRET    rc;  /* Return code */    
+   picturelist *picList;
+   hPicture *pPicture;
+   pdinfo    = pBlock->pDraginfo;
+   pszFolder = pBlock->pszTargetFolder;
+   BOOL     bNewItems = FALSE;
+
+   pErrorState = NULL;
+
+   //printf("ENTER:dropCopyThread\n");
+
+   if (pBlock->loader.pList == NULL)
+   {
+       picList = new picturelist();
+       WinPostMsg(pBlock->loader.hwndClient,UM_NEWLIST,0,(MPARAM)picList);
+   }
+   else
+   {
+       picList = pBlock->loader.pList;
+   }
+   /***************************************************************/
+   /* DrgSendTransferMsg needs a message queue, so create one for */
+   /* this thread                                                 */
+   /***************************************************************/
+   hab = WinInitialize (0);
+   hmq = WinCreateMsgQueue (hab, 0);
+ 
+   /***************************************************************/
+   /* Try to copy each item that was dragged                      */
+   /***************************************************************/
+   for (i = 0; i < pdinfo->cditem; i++)
+   {
+       if (pBlock->pAction[i] == UACT_SKIP)
+           continue;
+
+     /*************************************************************/
+     /* Get a pointer to the DRAGITEM                             */
+     /*************************************************************/
+        pditem = DrgQueryDragitemPtr (pdinfo, i);
+        flResult = DMFL_TARGETFAIL; 
+     /*************************************************************/
+     /* If we could query the source and target names, and the    */
+     /* copy was successful, return success                       */
+     /*************************************************************/
+
+        ulBytesWritten =DrgQueryStrName(pditem->hstrSourceName,
+                                        sizeof(szFileName),
+                                        (PSZ)szFileName);
+
+        //printf("szFileName %s\n",szFileName);
+
+        if (ulBytesWritten)
+            ulBytesWritten =DrgQueryStrName(pditem->hstrContainerName,
+                                            sizeof(szContain),
+                                            (PSZ)szContain);
+
+        //printf("szContain %s\n",szContain);
+
+        if (ulBytesWritten)
+        {
+            if (szContain[strlen(szContain)-1]!='\\')
+                sprintf(szSource,"%s\\%s",szContain,szFileName);
+            else
+                sprintf(szSource,"%s%s",szContain,szFileName);
+        }
+
+        if (ulBytesWritten)
+            ulBytesWritten = DrgQueryStrName (pditem->hstrTargetName, 
+                                              sizeof (szFileName),
+                                              (PSZ)szFileName);
+
+        if (ulBytesWritten)
+        {
+            if (pszFolder[strlen(pszFolder)-1]!='\\')
+                sprintf(szTarget,"%s\\%s",pszFolder,szFileName);
+            else
+                sprintf(szTarget,"%s%s",pszFolder,szFileName);
+        }
+
+        //printf("Target %s Source %s\n",szTarget,szSource);
+
+        rc = DosCopy ((PSZ)szSource, (PSZ)szTarget, 0);
+
+        if (ulBytesWritten &&  !rc)
+        {
+            flResult = DMFL_TARGETSUCCESSFUL;
+        }
+ 
+     /*************************************************************/
+     /* Otherwise, return failure                                 */
+     /*************************************************************/
+        else
+        {
+            flResult = DMFL_TARGETFAIL;
+            if (rc)
+            {
+                errorDosCopy(pBlock->loader.hwndClient,(int)rc);
+                //printf("DosCopy failure %d\n",rc);
+            }
+        }
+ 
+     /*************************************************************/
+     /* Let the source know we're done with this item             */
+     /*************************************************************/
+        DrgSendTransferMsg (pditem->hwndItem, DM_ENDCONVERSATION,
+                           (MPARAM) pditem->ulItemID,
+                           (MPARAM) flResult);
+
+        if (flResult == DMFL_TARGETSUCCESSFUL)
+        {
+            switch ( pBlock->pAction[i])
+            {
+            case UACT_NEWITEM:
+                pPicture = new hPicture(szTarget,szFileName,0);
+                picList->addPicture(pPicture);
+                bNewItems = TRUE;
+                break;
+            case UACT_OVERWRITE:
+                if ((pPicture = picList->findPicture(szFileName))!=NULL)
+                {
+                    pPicture->freeImage(); /* make ready for reload! */
+                    bNewItems = TRUE;
+                }
+                break;
+
+            }
+        }
+    }
+ 
+    WinDestroyMsgQueue (hmq);
+    WinTerminate (hab);
+
+    if (bNewItems)
+        picList->loadImages((hPicture *)0, pBlock->loader.hab, pBlock->loader.hwndClient);
+
+    DrgDeleteDraginfoStrHandles((PDRAGINFO)pdinfo);
+    DrgFreeDraginfo(pdinfo);
+
+    WinPostMsg(pBlock->loader.hwndClient,UM_DROPCOPYDONE,(MPARAM)bNewItems,(MPARAM)0);
+}
+
